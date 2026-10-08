@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "./",
+      "options": {
+        "mode": "guided",
+        "notifyOnLoad": true
+      }
+    }
+  ],
+  "default_agent": "orchestrator"
+}
