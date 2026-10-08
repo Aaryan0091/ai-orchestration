@@ -37,10 +37,11 @@ Updated: 2026-10-08
 - Copying agent instruction files with the installer does not transfer active sessions or conversation context.
 - This workflow is planned; coordinated execution and context handoff are not implemented yet.
 
-## Pending decisions
+## Orchestration decisions (2026-10-08)
 
-- The plugin creates and drives each specialist's session itself. Recommended; awaiting confirmation.
-- Hold the optional workflow enhancements until the MVP works end to end. Recommended; awaiting confirmation.
+- The plugin creates and drives each specialist's session itself (start, track, stop, retry, choose the model per agent).
+- The user can take over any agent's session manually at any time (e.g. send it prompts, pause the plugin's control, change its model or task) and hand control back to the orchestrator. Manual takeover must be available in every mode, not only Manual mode.
+- Build the MVP first. Optional workflow enhancements and cost-saving options wait until the MVP works end to end.
 
 ## Verification status
 

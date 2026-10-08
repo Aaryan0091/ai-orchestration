@@ -34,7 +34,7 @@ An AI team inside OpenCode. The orchestrator splits a request into tasks, each t
 | 2 | Agents | Partly done | 8 agents with per-role permissions exist; still: role instructions, a default tier and step limit per agent |
 | 3 | Model system | Planned | User picks small/mid/big models and the orchestrator's model; per-task routing by difficulty; overrides at every level; reasoning effort; same-tier fallback and approved escalation; local models; exclude OpenCode free models |
 | 4 | Orchestration engine | Planned | Plan tasks with dependencies and difficulty; context handoff; one task at a time first; free checks before paid review; verifier; one final answer; cancel, retry, continue (pause = hold the next task) |
-| 5 | Agent workspace (browser) | Planned | Plugin-served local page: agent list, chat per agent, working/waiting/completed/failed, model and task, parent/child links, approval alerts, typing to any agent (reported back to the orchestrator), `#a8f5e9` accent |
+| 5 | Agent workspace (browser) | Planned | Plugin-served local page: agent list, chat per agent, working/waiting/completed/failed, model and task, parent/child links, approval alerts, typing to any agent (reported back to the orchestrator), manual take-over and hand-back per agent, `#a8f5e9` accent |
 | 6 | Control and safety | Planned | Editable plan preview, approvals, per-agent permissions, token/cost/step budgets, worktrees so parallel agents never edit the same files, record of which agent changed what |
 | 7 | Visualizer | Planned | Mermaid, ASCII flows, dependency graphs, activity timelines, code walkthroughs; then interactive animations and simulations in the same browser page |
 | 8 | Memory and workflows | Planned | Per-project settings and model tiers, reusable workflows and presets, resume after restart, reused explorer findings, session summaries, no secrets in storage |
@@ -49,10 +49,11 @@ Phase 3 (tier selection + difficulty routing) → Phase 4 (one task at a time + 
 
 MVP flow: install plugin → choose models → enter a task → orchestrator plans → agents work in separate sessions → user watches and talks to them → verifier checks → final answer.
 
-### Open decisions
+### Decisions (2026-10-08)
 
-1. The plugin creates and drives each specialist's session itself (`session.create` with parent, agent, model and permissions). Recommended; awaiting confirmation.
-2. Hold the optional workflow controls below until the MVP works end to end. Recommended; awaiting confirmation.
+1. The plugin creates and drives each specialist's session itself (`session.create` with parent, agent, model and permissions).
+2. The user can take over any agent manually at any time, in every mode, and hand it back to the orchestrator.
+3. The optional workflow controls below wait until the MVP works end to end.
 
 ### Still to verify
 
