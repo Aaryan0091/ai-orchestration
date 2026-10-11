@@ -46,5 +46,5 @@ Updated: 2026-10-08
 ## Verification status
 
 - Both plugins load in OpenCode 2.0.22: `/plugins` lists `ai-orchestration.tui` and `ai-orchestration.server` as loaded (2026-10-08).
-- The startup notification was hidden by another plugin's error notification; re-check that it is visible now that claude-mem is disabled.
+- The startup notification never showed because OpenCode 2.0.22 passes project options only to the server plugin; the TUI plugin saw no `notifyOnLoad` and defaulted to off. Fixed: the TUI plugin now notifies by default. Verified in an interactive OpenCode 2.0.22 terminal on 2026-10-11: the startup toast renders, and global `cli.json` with the checkout's absolute package path and `notifyOnLoad: false` suppresses it while `/plugins` still lists both local plugins as loaded. Verification used isolated XDG config/data/cache/state directories, preserving the user's global configuration and credentials.
 - The orchestrator replies inside OpenCode on a connected provider (Gemini 3.8 Flash).

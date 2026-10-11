@@ -37,7 +37,20 @@ bun run check
 opencode
 ```
 
-The root `opencode.jsonc` loads this repository through its local `server.ts` and `tui.ts` entrypoints and selects the bundled `orchestrator` agent. Set `notifyOnLoad` to `false` if you do not want the startup toast.
+The root `opencode.jsonc` loads this repository through its local `server.ts` and `tui.ts` entrypoints and selects the bundled `orchestrator` agent. The terminal plugin shows an "AI Orchestration ready" notification on startup. OpenCode passes project options only to the server plugin. To disable the notification during local development, add an entry to the `plugins` list in the global `~/.config/opencode/cli.json` (or `$XDG_CONFIG_HOME/opencode/cli.json`):
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "/absolute/path/to/your/checkout",
+      "options": { "notifyOnLoad": false }
+    }
+  ]
+}
+```
+
+Replace the path with your checkout's absolute path; paste it inside the quotes. Preserve any other settings and plugin entries already in that file. Use the local checkout path while developing: the npm package name would attempt to resolve a published package instead. Startup visibility and disabling with the absolute local path were verified in an interactive OpenCode 2.0.22 terminal on 2026-10-11, with isolated configuration and data directories.
 
 ## Use the sample configuration
 
@@ -66,7 +79,6 @@ Use `opencode models` to list valid IDs. Users can select a different model for 
       "package": "opencode-orchestrator",
       "options": {
         "mode": "guided",
-        "notifyOnLoad": true,
       },
     },
   ],

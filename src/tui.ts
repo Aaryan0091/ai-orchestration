@@ -1,15 +1,15 @@
 import { Plugin } from "@opencode/plugin/tui"
 
-import { parseOptions } from "./shared/types.ts"
+import { parseTuiOptions } from "./shared/types.ts"
 
 export default Plugin.define({
   id: "ai-orchestration.tui",
   setup(context) {
-    const options = parseOptions(context.options)
+    const options = parseTuiOptions(context.options)
 
     if (options.notifyOnLoad) {
       context.ui.toast.show({
-        message: `AI Orchestration ready (${options.mode} mode)`,
+        message: "AI Orchestration ready",
         variant: "success",
       })
     }

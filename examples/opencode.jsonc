@@ -4,8 +4,7 @@
     {
       "package": "opencode-orchestrator",
       "options": {
-        "mode": "guided",
-        "notifyOnLoad": true
+        "mode": "guided"
       }
     }
   ]
