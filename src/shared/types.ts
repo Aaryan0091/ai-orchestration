@@ -18,6 +18,9 @@ export type AgentId = (typeof AGENT_IDS)[number]
 export interface OrchestratorOptions {
   /** Controls whether the orchestrator may choose agents and models automatically. */
   mode: RoutingMode
+}
+
+export interface TuiOptions {
   /** Shows a terminal notification when the TUI plugin is loaded. */
   notifyOnLoad: boolean
 }
@@ -34,12 +37,24 @@ export function isRoutingMode(value: unknown): value is RoutingMode {
 
 export function parseOptions(value: unknown): OrchestratorOptions {
   if (!value || typeof value !== "object") {
-    return { mode: "guided", notifyOnLoad: false }
+    return { mode: "guided" }
   }
 
   const options = value as Record<string, unknown>
   return {
     mode: isRoutingMode(options.mode) ? options.mode : "guided",
-    notifyOnLoad: options.notifyOnLoad === true,
   }
+}
+
+/**
+ * OpenCode 2.0.22 passes project `opencode.jsonc` options only to the server plugin. The TUI
+ * plugin receives options solely from the global `cli.json`, so the notification stays on
+ * unless that file explicitly sets `notifyOnLoad` to `false`.
+ */
+export function parseTuiOptions(value: unknown): TuiOptions {
+  if (!value || typeof value !== "object") {
+    return { notifyOnLoad: true }
+  }
+
+  return { notifyOnLoad: (value as Record<string, unknown>).notifyOnLoad !== false }
 }

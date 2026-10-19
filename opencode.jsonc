@@ -4,8 +4,7 @@
     {
       "package": "./",
       "options": {
-        "mode": "guided",
-        "notifyOnLoad": true
+        "mode": "guided"
       }
     }
   ],
