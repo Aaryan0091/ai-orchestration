@@ -1,6 +1,6 @@
 # OpenCode Orchestrator — project plan
 
-Status: Phases 0–1 complete; everything else planned, not implemented. Updated: 2026-10-08.
+Status: Phases 0–1 complete; Phase 3 single-task routing implemented with branch-finish error/retry safety fixes and successful real-provider text-response acceptance. Full coordinated workflows and browser workspace remain planned. Updated: 2026-10-20.
 
 ## Purpose
 
@@ -31,8 +31,8 @@ An AI team inside OpenCode. The orchestrator splits a request into tasks, each t
 | --- | --- | --- | --- |
 | 0 | Confirm OpenCode APIs | Done | V2 only, pinned to 2.0.22, no V1 examples or deprecated fields |
 | 1 | Create the project | Done | Server + terminal plugins, shared types, config, installer, tests; both plugins verified loaded in OpenCode 2.0.22 |
-| 2 | Agents | Partly done | 8 agents with per-role permissions exist; still: role instructions, a default tier and step limit per agent |
-| 3 | Model system | Planned | User picks small/mid/big models and the orchestrator's model; per-task routing by difficulty; overrides at every level; reasoning effort; same-tier fallback and approved escalation; local models; exclude OpenCode free models |
+| 2 | Agents | Mostly done | 8 agents with role instructions, permissions and step limits exist; real coordinated delegation still needs verification |
+| 3 | Model system | Implemented single-task slice | Project-scoped tiers, manual or local rules-based difficulty, capability checks, approved isolated session execution, reasoning variants, opt-in same-tier fallback and higher-tier escalation, bounded retries, status/cancel; full workflow graph and independent verification remain Phase 4 |
 | 4 | Orchestration engine | Planned | Plan tasks with dependencies and difficulty; context handoff; one task at a time first; free checks before paid review; verifier; one final answer; cancel, retry, continue (pause = hold the next task) |
 | 5 | Agent workspace (browser) | Planned | Plugin-served local page: agent list, chat per agent, working/waiting/completed/failed, model and task, parent/child links, approval alerts, typing to any agent (reported back to the orchestrator), manual take-over and hand-back per agent, `#a8f5e9` accent |
 | 6 | Control and safety | Planned | Editable plan preview, approvals, per-agent permissions, token/cost/step budgets, worktrees so parallel agents never edit the same files, record of which agent changed what |
@@ -42,6 +42,10 @@ An AI team inside OpenCode. The orchestrator splits a request into tasks, each t
 | 10 | Release | Planned | License, GitHub and npm, docs, agent presets, example workflows, version checks |
 
 ### MVP route
+
+Routing slice: `/orchestration-models` manages project selections; `/orchestration-route` previews manual or `auto` rules-based task assessment without generation. `/orchestration-run` requires explicit TUI confirmation, then creates isolated agent sessions with selected models; status/cancel use run IDs. `/orchestration-policy` persists separately opt-in named reasoning variants, one same-tier fallback per tier, escalation and 0–3 retries. Credentials/permissions/ambiguous failures do not replay; confirmed pre-generation provider failures may retry only this task. Mode options do not yet activate full workflow scheduling. Desktop controls await the browser workspace.
+
+Branch-finish safety (2026-10-20): structured RPC errors preserve missing-tier/validation messages and block invalid approval/dispatch. Active plugin-owned child sessions disable OpenCode's built-in retry; ordinary user chats are unchanged. Final failure requires sufficient stop evidence; uncertain stops stay stopping and retain capacity. Latest official isolated CLI checked for this run: 2.0.32. Deterministic local HTTP fixture checks passed successful completion and a single-request 429 failure (1/1 attempt, no hidden retry), plus explicit TUI missing-tier errors. These latest-version checks are transport/state tests, not a real model answer. Separate real-provider acceptance passed on installed OpenCode 2.0.28: explorer used the saved small-tier Google Gemini 3.8 Flash and returned `ROUTING_LIVE_OK`, completed 1/1, zero tools and no retries/fallback; the original chat model was unchanged. Observed cost: $0.0035865. Real-provider generation on latest isolated 2.0.32 and README/tool-use verification are not claimed. After the fixes, all 69 tests (289 assertions), types, formatting, build and Git whitespace checks passed. This branch's implementation and acceptance work is complete; the user's review/commit remains. No automatic commit is authorized.
 
 Build narrow slices instead of finishing phases in order:
 
