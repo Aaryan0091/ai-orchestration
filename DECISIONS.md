@@ -1,24 +1,41 @@
 # Project decisions
 
+## Context-handoffs final acceptance (2026-10-28)
+
+- Result retrieval and permission enforcement are verified on the installed OpenCode **2.2.0** host with an isolated synthetic localhost HTTP model fixture. Run `339e189d-d43c-4818-8d15-06f7a0021f33` completed; the real result RPC returned `HANDOFF_CHECK_OK`, provenance and `evidenceVerified:false`. Re-reading the result generated no extra model request.
+- The tool's `options.permission` label alone did not request approval. The fix explicitly awaits native `ctx.permission.assert` before report lookup, with the actual tool-call source and exact captured run ID. A real pending `orchestration_result` request appeared; rejection withheld the report, separate one-time approval returned it, and Explorer was blocked. Missing native support fails closed; pre/post-await aborts cannot retrieve a report, and caller mutation cannot switch the approved run ID while permission is pending.
+- All seven fixture model requests were local and synthetic, with no paid-provider generation or use/change of user credentials/global settings. The owned fixture/server were stopped. This acceptance exercised native permission requests/replies through the API, not visual TUI permission clicks or a fresh real-model answer. Evidence: `/private/tmp/handoff-final.tVS373/evidence.json` and redacted `server-output.txt`.
+- Final checks: **89 tests / 655 assertions**, formatting, types, build, working-tree and staged whitespace checks passed; independent review found no blocker. The API dependency remains `@opencode/plugin@2.0.22`; native permission assertion is capability-checked at runtime. No minimum assertion-capable host version or universal version compatibility is claimed, and no app upgrade was performed.
+- This completes the bounded `context-handoffs` implementation/acceptance slice, not automatic coordination, desktop chat controls, independent verification or durable history. Persistent run/result storage remains Phase 8 work for a separate future branch. Changes remain for the user's review and commit; no commit, merge or staging action was authorized.
+
+## Explicit context handoffs (2026-10-22)
+
+- `/orchestration-handoff preview|run JSON` accepts an explicit version-1 context package: objective, relative file references/optional excerpts, findings, constraints, previous run summaries and unique acceptance checks. Unknown fields, traversal paths and oversized payloads reject before dispatch. No files, active chat or history are automatically read/copied.
+- The full package/model/policy is cloned before asynchronous preparation and shown for explicit approval; edits after preparation cannot mutate the ticket. Existing specialist permissions apply. Paths/constraints are not a filesystem sandbox or authorization to expand access. All findings/prior summaries are labelled untrusted and may be stale.
+- Specialists return bounded final-message JSON reports with summary/findings/evidence/check results/limitations. Interim narration is excluded. Malformed or incomplete reports fail without replay; valid reports remain self-reported, with `evidenceVerified:false`, even when checks claim passed. Completion is not independent verification.
+- The caller retrieves run/session/model provenance and reports via `/orchestration-run result RUN_ID`; the orchestrator's read-only `orchestration_handoff_result` tool can retrieve existing current-project runs, guarded by role and a narrow `orchestration_result` ask permission. It cannot start or approve tasks. Result retrieval does not re-run work.
+- Prior output is reused only when the caller explicitly places selected summary/ID into a new package and approves the next task. Automatic task graph/scheduling, stale-context refresh, independent verification, specialist-chat takeover synchronization and durable resume remain planned. No claude-mem hook is required or enabled by this implementation.
+- Historical verification: 78 tests/349 assertions, formatting, types, build and Git whitespace checks passed. An independent isolated localhost server using installed OpenCode CLI 2.1.2 (`/private/tmp/handoff-runtime-NHDBdk`) loaded the plugin, awaiting its tool transform. Actual `/api/rpc/ai-orchestration.routing/handoff` calls returned HANDOFF_ERROR for invalid data and an actionable missing-small-tier error for a valid package preview; unknown result lookup returned Unknown task run. Sessions stayed empty before/after; no provider credentials or generation were used, and the server was stopped. This earlier check covered loading/local validation only; the final acceptance above supersedes its pending result/permission checks. It did not establish a fresh real-provider response or latest-release compatibility.
+
 ## Task routing execution slice
 
 - Automatic difficulty is conservative local rules-based assessment, with explicit difficulty/model/agent overrides; no paid classifier call.
 - Inventory capabilities and named variants are validated. A required unavailable capability blocks dispatch rather than silently choosing an unapproved model.
 - `/orchestration-run` prepares a single-use ten-minute approval ticket. Its exact task, agent, candidate models and optional policy are frozen; confirmation starts an isolated agent session, never changes the current chat model.
 - Reasoning variants, same-tier fallback, higher-tier failed-step escalation and retry count are independently configurable, project-scoped and disabled by default. Only confirmed pre-generation provider failures can safely retry without another approval; edits/tool-bearing, credentials, permissions and uncertain failures do not automatically replay.
-- Completion proves a normal session outcome, not independent verification. Full task graphs, context handoffs, workflow modes and verifier-driven retry await Phase 4.
+- Completion proves a normal session outcome, not independent verification. Full task graphs, automatic context collection, workflow modes and verifier-driven retry await Phase 4; explicit context handoffs are now covered by the slice above.
 - Cancellation explicitly interrupts the child and checks idle outcome. Uncertain stop is reported honestly. Runtime state is bounded and in-memory, not crash-recoverable; a timed-out creation may leave an empty unprompted session.
 - Branch-finish fixes (2026-10-20): validation errors cross RPC as safe structured results, preserving actionable messages rather than generic Request failed. An invalid preparation starts no approval/session. OpenCode's built-in `session.retry` is disabled only for active plugin-owned child sessions, so the approved candidate/attempt count controls retries; ordinary chats retain their existing behaviour. Provider errors require sufficient terminal/stop evidence before final failure; an uncertain stop retains its active slot.
 - Plugin type dependency remains tested API 2.0.22; installed desktop and latest official standalone live validation are recorded separately, without changing global credentials/configuration.
 - 2026-10-13 latest official standalone CLI 2.0.28: configuration, auto preview, TUI approval cancellation and isolated dispatch checked. The enabled zero-cost `opencode/big-pickle` model rejected custom agents at execution, so selection/list now explicitly reject/flag it. The older inventory-only check did not prove execution eligibility. No successful paid-provider answer was run; an eligible connected provider with user spending approval is still needed for that live check.
 
-Updated: 2026-10-20
+Updated: 2026-10-28
 
 ## Platform
 
 - Target OpenCode V2 only, pinned to 2.0.22 (`@opencode/plugin` 2.0.22). Do not run `/update` until a dedicated upgrade branch re-tests and re-pins.
 - The server plugin works in both the OpenCode desktop app and the terminal app because both use the same engine.
-- OpenCode V2 has no plugin API for the desktop app's interface, so the agent workspace and visualizer will be a local web page served by the plugin and opened in the browser. The terminal plugin keeps small extras such as the startup notification.
+- The primary product goal is normal chat in the OpenCode desktop app, not terminal-only use. The original browser-workspace plan followed the desktop API limitations checked with 2.0.22. Current official docs now describe a [GUI-experimental plugin part](https://opencode.ai/v2/docs/build/plugins) for Desktop; evaluate it on a separate future branch before choosing native GUI versus the existing browser-workspace plan. No GUI implementation or architecture migration is included in `context-handoffs`. The terminal plugin keeps small extras such as the startup notification.
 - No LangGraph or other workflow engine unless OpenCode's session system proves insufficient.
 
 ## Model control
@@ -40,7 +57,7 @@ Updated: 2026-10-20
 - These extras are independent of Automatic/Guided/Manual mode; presets can be customized.
 - See [the project plan](PLAN.md) for behaviour, controls, defaults, and verification criteria. These options are planned, not implemented.
 
-## Context handoff to implement
+## Context handoff roadmap
 
 - The orchestrator gives each specialist a bounded task and relevant context.
 - Explorer can gather repository evidence for the handoff.
@@ -48,7 +65,7 @@ Updated: 2026-10-20
 - Specialists return results to the orchestrator for coordination and verification.
 - When the user messages a specialist directly, the change is reported back to the orchestrator so later handoffs stay current.
 - Copying agent instruction files with the installer does not transfer active sessions or conversation context.
-- This workflow is planned; coordinated execution and context handoff are not implemented yet.
+- Explicit package delivery/report retrieval is implemented as described above. Automatic coordinated execution, context collection and manual-takeover synchronization remain planned.
 
 ## Orchestration decisions (2026-10-08)
 

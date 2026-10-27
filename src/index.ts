@@ -4,6 +4,7 @@ import { routingReply, routingRpc } from "./rpc.ts"
 import { createExecutionEngine } from "./execution.ts"
 import { createExecutionCommands } from "./execution-commands.ts"
 import { createSessionAdapter } from "./session-adapter.ts"
+import { registerHandoffResultTool } from "./handoff-tool.ts"
 
 import { AGENT_IDS, parseOptions, type PluginSnapshot } from "./shared/types.ts"
 
@@ -57,7 +58,9 @@ export default Plugin.define({
       read: () => context.storage.get(policyKey),
       write: (value) => context.storage.set(policyKey, JSON.parse(JSON.stringify(value))),
     })
+    let toolRegistration: Awaited<ReturnType<typeof registerHandoffResultTool>> | undefined
     try {
+      toolRegistration = await registerHandoffResultTool(context, engine.handoffResult)
       const registration = await context.rpc.register(routingRpc, {
         models: async (input, call) =>
           routingReply(() => commands.models(typeof input === "string" ? input : "", call.signal)),
@@ -65,6 +68,18 @@ export default Plugin.define({
           routingReply(() => execution.preview(typeof input === "string" ? input : "")),
         prepare: async (input) =>
           routingReply(() => execution.prepare(typeof input === "string" ? input : "")),
+        handoff: async (input) =>
+          routingReply(async () => {
+            const match =
+              typeof input === "string" ? /^(preview|run)\s+([\s\S]+)$/.exec(input.trim()) : null
+            if (!match)
+              throw new Error(
+                "Usage: preview JSON | run JSON; paste the complete handoff request object.",
+              )
+            return match[1] === "run"
+              ? execution.prepareHandoff(match[2]!)
+              : execution.previewHandoff(match[2]!)
+          }),
         start: async (input) =>
           routingReply(() => execution.start(typeof input === "string" ? input : "")),
         discard: async (input) =>
@@ -78,11 +93,19 @@ export default Plugin.define({
         try {
           await registration.dispose()
         } finally {
-          await adapter.dispose()
+          try {
+            await toolRegistration?.dispose()
+          } finally {
+            await adapter.dispose()
+          }
         }
       }
     } catch (error) {
-      await adapter.dispose()
+      try {
+        await toolRegistration?.dispose()
+      } finally {
+        await adapter.dispose()
+      }
       throw error
     }
   },

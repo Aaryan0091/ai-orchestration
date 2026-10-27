@@ -59,6 +59,7 @@ test("all server RPC handlers return portable application failures, not opaque e
     {}
   const saved = new Map<string, unknown>()
   const cleanup = await server.setup({
+    tool: { transform: async () => ({ dispose: async () => {} }) },
     location: { directory: "/rpc-errors" },
     options: {},
     storage: {
@@ -84,6 +85,8 @@ test("all server RPC handlers return portable application failures, not opaque e
       ["models", "set"],
       ["route", "easy read README"],
       ["prepare", "easy read README"],
+      ["handoff", 'run {"permissions":"allow"}'],
+      ["handoff", "wrong"],
       ["start", "unknown"],
       ["run", "status unknown"],
       ["policy", "wrong"],
@@ -102,6 +105,50 @@ test("all server RPC handlers return portable application failures, not opaque e
     ).toBe("string")
   } finally {
     await cleanup?.()
+  }
+})
+
+test("server releases result tool and retry guard on registration failure or cleanup failure", async () => {
+  for (const failRegistration of [true, false]) {
+    const disposed: string[] = []
+    const context = {
+      location: { directory: "/cleanup" },
+      options: {},
+      storage: { set: async () => {}, get: async () => undefined },
+      session: {
+        hook: async () => ({
+          dispose: async () => {
+            disposed.push("retry")
+          },
+        }),
+      },
+      tool: {
+        transform: async () => ({
+          dispose: async () => {
+            disposed.push("result-tool")
+          },
+        }),
+      },
+      rpc: {
+        register: async () => {
+          if (failRegistration) throw new Error("registration failed")
+          return {
+            dispose: async () => {
+              disposed.push("rpc")
+              throw new Error("cleanup failed")
+            },
+          }
+        },
+      },
+    } as unknown as Plugin.Context
+    if (failRegistration) await expect(server.setup(context)).rejects.toThrow("registration failed")
+    else {
+      const cleanup = await server.setup(context)
+      await expect(cleanup?.()).rejects.toThrow("cleanup failed")
+    }
+    expect(disposed).toEqual(
+      failRegistration ? ["result-tool", "retry"] : ["rpc", "result-tool", "retry"],
+    )
   }
 })
 

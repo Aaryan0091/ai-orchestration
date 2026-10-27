@@ -7,6 +7,52 @@ import {
   type TaskRun,
 } from "./execution.ts"
 import { formatSelection, parseSelection, type Difficulty } from "./routing.ts"
+import { HANDOFF_ERROR, validateHandoff } from "./handoffs.ts"
+
+/** Bounded JSON crosses the RPC trust boundary; unknown authority-bearing fields reject. */
+export function parseHandoffRequest(text: string): ExecutionRequest {
+  try {
+    if (text.length > 60000) throw new Error(HANDOFF_ERROR)
+    const value: unknown = JSON.parse(text)
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).some((key) => !["agent", "difficulty", "model", "handoff"].includes(key))
+    )
+      throw new Error(HANDOFF_ERROR)
+    const input = value as Record<string, unknown>
+    const handoff = validateHandoff(input.handoff)
+    if (
+      typeof input.agent !== "string" ||
+      ![
+        "explorer",
+        "planner",
+        "builder",
+        "debugger",
+        "reviewer",
+        "verifier",
+        "visualizer",
+      ].includes(input.agent)
+    )
+      throw new Error(HANDOFF_ERROR)
+    if (
+      input.difficulty !== undefined &&
+      !["auto", "easy", "medium", "hard"].includes(input.difficulty as string)
+    )
+      throw new Error(HANDOFF_ERROR)
+    if (input.model !== undefined && typeof input.model !== "string") throw new Error(HANDOFF_ERROR)
+    return {
+      task: handoff.objective,
+      agent: input.agent as AgentRole,
+      difficulty: (input.difficulty ?? "auto") as Difficulty | "auto",
+      ...(input.model !== undefined ? { model: parseSelection(input.model as string) } : {}),
+      handoff,
+    }
+  } catch {
+    throw new Error(HANDOFF_ERROR)
+  }
+}
 
 export interface PolicyStore {
   read(): Promise<unknown>
@@ -103,6 +149,13 @@ export function formatPlan(plan: ExecutionPlan): string {
     `Required: ${plan.assessment.capabilities.join(", ")}`,
     `Approved models: ${plan.models.map(formatSelection).join(" → ")}`,
     `Maximum attempts: ${plan.models.length}; escalation: ${plan.options.escalateFailedStep === true ? "on" : "off"}`,
+    ...(plan.handoff
+      ? [
+          "Explicit context handoff (untrusted caller-supplied data, not independently verified). The full package below is bound to this single-use approval. No files or chat history are automatically collected. File references do not grant permissions.",
+          JSON.stringify(plan.handoff, null, 2),
+          "Review this context for secrets before approval: all supplied contents are sent to the approved provider(s). Specialist checks/evidence are self-reported, not independent verification.",
+        ]
+      : []),
     "Cost unknown. Running sends this task to the listed provider(s), may spend API credits and uses the agent's project permissions.",
     "Only this task retries, only before tools run. Current chat stays unchanged.",
     "OpenCode's automatic provider retries are disabled for these child sessions; only the approved attempts may run.",
@@ -130,6 +183,15 @@ export function createExecutionCommands(
     return restorePolicy(await store.read())
   }
   return {
+    async prepareHandoff(text: string) {
+      const plan = await engine.preview({ ...parseHandoffRequest(text), options: await options() })
+      return { id: plan.id, message: formatPlan(plan) }
+    },
+    async previewHandoff(text: string) {
+      const plan = await engine.preview({ ...parseHandoffRequest(text), options: await options() })
+      engine.discard(plan.id)
+      return `Handoff preview only — no agents started or model requests sent.\n${formatPlan(plan)}`
+    },
     async prepare(text: string) {
       const plan = await engine.preview({
         ...parseExecutionRequest(text),
@@ -154,10 +216,11 @@ export function createExecutionCommands(
     },
     async runCommand(text: string) {
       const [action, id, ...extra] = text.trim().split(/\s+/)
-      if (extra.length || !id || !["status", "cancel"].includes(action ?? ""))
+      if (extra.length || !id || !["status", "cancel", "result"].includes(action ?? ""))
         throw new Error(
-          "Usage: status RUN_ID | cancel RUN_ID; to start use /orchestration-run auto TASK",
+          "Usage: status RUN_ID | cancel RUN_ID | result RUN_ID; to start use /orchestration-run auto TASK",
         )
+      if (action === "result") return JSON.stringify(engine.handoffResult(id), null, 2)
       return formatRun(action === "cancel" ? await engine.cancel(id) : engine.status(id))
     },
     policy(text: string): Promise<string> {

@@ -1,6 +1,6 @@
 # OpenCode Orchestrator — project plan
 
-Status: Phases 0–1 complete; Phase 3 single-task routing implemented with branch-finish error/retry safety fixes and successful real-provider text-response acceptance. Full coordinated workflows and browser workspace remain planned. Updated: 2026-10-20.
+Status: Phases 0–1 complete; Phase 3 single-task routing implemented; Phase 4 explicit bounded context-handoff/report slice implemented and final acceptance verified. Full coordinated workflows and desktop chat/workspace controls remain planned. Updated: 2026-10-28.
 
 ## Purpose
 
@@ -10,17 +10,18 @@ An AI team inside OpenCode. The orchestrator splits a request into tasks, each t
 - A WhatsApp-like workspace: see every agent's chat and status, and talk to any agent directly with normal prompts.
 - A visualizer that explains code and tasks with diagrams, later with interactive animations.
 - The user stays in control of models, approvals and spending.
+- The main user experience is normal chat in the **OpenCode desktop app**; the terminal is the initial development/testing interface, not the final limitation.
 
 ## How it runs in OpenCode
 
 - The **server plugin** (`@opencode/plugin`) runs inside the OpenCode engine, which both the desktop app and the terminal app use. Agents, model routing and orchestration therefore work in either app.
-- The **terminal plugin** (`@opencode/plugin/tui`) only changes the terminal app. OpenCode V2 has no plugin API for the desktop app's interface (checked against the V2 docs and the `@opencode/plugin@2.0.22` exports).
+- The **terminal plugin** (`@opencode/plugin/tui`) only changes the terminal app. The earlier desktop-API limitation was checked against 2.0.22. Current official docs now describe a [GUI-experimental plugin part](https://opencode.ai/v2/docs/build/plugins) for Desktop; evaluate it in future desktop work, not this branch.
 - Decision: the agent workspace (Phase 5) and the visualizer (Phase 7) are a **local web page served by the plugin** and opened in the browser, so they work with the desktop app and the terminal alike. The terminal plugin keeps small extras such as the startup notification.
 - Each specialist runs in a normal OpenCode session, so it should also appear in the desktop app's own session list (to verify).
 
 ## Constraints
 
-- Pinned to OpenCode **2.0.22** (`@opencode/plugin` 2.0.22). Do not run `/update` (2.0.25 is offered) until a dedicated upgrade branch re-tests and re-pins.
+- The plugin API dependency remains pinned to **`@opencode/plugin` 2.0.22**; final runtime acceptance used installed OpenCode **2.2.0**. The Orchestrator's result tool requires native `permission.assert` and fails closed if that capability is missing. Future app or dependency upgrades need dedicated compatibility checks before adoption; this branch changes neither the dependency pin nor the installed app.
 - **OpenCode's free models (`opencode/*-free`) reject custom agents** with "OpenCode's free tier can only be used from within OpenCode". Verified 2026-10-08: the built-in `build` agent works on a free model; our `explorer` and `orchestrator` are rejected. The tier picker must exclude or clearly flag these models for our agents. Connected providers (Google, OpenAI and others) and local models work.
 - The plugin never asks for or stores API keys; OpenCode's provider connections handle them.
 - No LangGraph or other workflow engine unless OpenCode's session system proves insufficient.
@@ -33,7 +34,7 @@ An AI team inside OpenCode. The orchestrator splits a request into tasks, each t
 | 1 | Create the project | Done | Server + terminal plugins, shared types, config, installer, tests; both plugins verified loaded in OpenCode 2.0.22 |
 | 2 | Agents | Mostly done | 8 agents with role instructions, permissions and step limits exist; real coordinated delegation still needs verification |
 | 3 | Model system | Implemented single-task slice | Project-scoped tiers, manual or local rules-based difficulty, capability checks, approved isolated session execution, reasoning variants, opt-in same-tier fallback and higher-tier escalation, bounded retries, status/cancel; full workflow graph and independent verification remain Phase 4 |
-| 4 | Orchestration engine | Planned | Plan tasks with dependencies and difficulty; context handoff; one task at a time first; free checks before paid review; verifier; one final answer; cancel, retry, continue (pause = hold the next task) |
+| 4 | Orchestration engine | Explicit handoff slice verified | User-selected context package → approved isolated specialist → structured, unverified report retrievable by caller/orchestrator with native permission enforcement. Task graphs, automatic delegation/context collection, independent verifier, coordinated final answer and pause/continue remain planned |
 | 5 | Agent workspace (browser) | Planned | Plugin-served local page: agent list, chat per agent, working/waiting/completed/failed, model and task, parent/child links, approval alerts, typing to any agent (reported back to the orchestrator), manual take-over and hand-back per agent, `#a8f5e9` accent |
 | 6 | Control and safety | Planned | Editable plan preview, approvals, per-agent permissions, token/cost/step budgets, worktrees so parallel agents never edit the same files, record of which agent changed what |
 | 7 | Visualizer | Planned | Mermaid, ASCII flows, dependency graphs, activity timelines, code walkthroughs; then interactive animations and simulations in the same browser page |
@@ -43,7 +44,11 @@ An AI team inside OpenCode. The orchestrator splits a request into tasks, each t
 
 ### MVP route
 
-Routing slice: `/orchestration-models` manages project selections; `/orchestration-route` previews manual or `auto` rules-based task assessment without generation. `/orchestration-run` requires explicit TUI confirmation, then creates isolated agent sessions with selected models; status/cancel use run IDs. `/orchestration-policy` persists separately opt-in named reasoning variants, one same-tier fallback per tier, escalation and 0–3 retries. Credentials/permissions/ambiguous failures do not replay; confirmed pre-generation provider failures may retry only this task. Mode options do not yet activate full workflow scheduling. Desktop controls await the browser workspace.
+Context-handoffs slice (implemented 2026-10-22; final acceptance 2026-10-28): `/orchestration-handoff preview|run JSON` validates a versioned, bounded package (objective/files/findings/constraints/prior summaries/acceptance checks), then reuses existing model routing and explicit approval. The full package is immutable across approval; no file/history collection or permission expansion. A normal terminal session outcome plus a valid final JSON report completes the run; invalid reports fail without replay, and report checks/evidence remain self-reported. `/orchestration-run result RUN_ID` retrieves JSON provenance/report; the orchestrator can read an existing ID with `orchestration_handoff_result`, guarded by role and explicit native `permission.assert` for the exact run ID. Missing native assertion support fails closed. Next handoffs explicitly include selected previous findings; no automatic dependency scheduling. See README for copy-paste commands and `examples/handoff.json` for the full request.
+
+Final acceptance used the installed OpenCode **2.2.0** host and a synthetic localhost HTTP model fixture: a completed report returned `HANDOFF_CHECK_OK`/`evidenceVerified:false`, repeated retrieval made no extra model request, native permission rejection withheld the report, one-time approval returned it, and Explorer was blocked. All seven model requests were local, not paid-provider generation. Permission replies were tested through the API, not visual TUI clicks. The owned fixture/server were stopped and user credentials/global settings were not used or changed. **89 tests / 655 assertions**, types, formatting, build, working-tree/staged whitespace checks and independent review passed. No app upgrade, dependency-pin change, persistence implementation, commit or merge was performed. Evidence: `/private/tmp/handoff-final.tVS373/`.
+
+Routing slice: `/orchestration-models` manages project selections; `/orchestration-route` previews manual or `auto` rules-based task assessment without generation. `/orchestration-run` requires explicit TUI confirmation, then creates isolated agent sessions with selected models; status/cancel use run IDs. `/orchestration-policy` persists separately opt-in named reasoning variants, one same-tier fallback per tier, escalation and 0–3 retries. Credentials/permissions/ambiguous failures do not replay; confirmed pre-generation provider failures may retry only this task. Mode options do not yet activate full workflow scheduling. Desktop chat controls remain future work; evaluate native GUI-experimental support separately while retaining the existing browser-workspace plan until a choice is made.
 
 Branch-finish safety (2026-10-20): structured RPC errors preserve missing-tier/validation messages and block invalid approval/dispatch. Active plugin-owned child sessions disable OpenCode's built-in retry; ordinary user chats are unchanged. Final failure requires sufficient stop evidence; uncertain stops stay stopping and retain capacity. Latest official isolated CLI checked for this run: 2.0.32. Deterministic local HTTP fixture checks passed successful completion and a single-request 429 failure (1/1 attempt, no hidden retry), plus explicit TUI missing-tier errors. These latest-version checks are transport/state tests, not a real model answer. Separate real-provider acceptance passed on installed OpenCode 2.0.28: explorer used the saved small-tier Google Gemini 3.8 Flash and returned `ROUTING_LIVE_OK`, completed 1/1, zero tools and no retries/fallback; the original chat model was unchanged. Observed cost: $0.0035865. Real-provider generation on latest isolated 2.0.32 and README/tool-use verification are not claimed. After the fixes, all 69 tests (289 assertions), types, formatting, build and Git whitespace checks passed. This branch's implementation and acceptance work is complete; the user's review/commit remains. No automatic commit is authorized.
 
@@ -67,10 +72,11 @@ MVP flow: install plugin → choose models → enter a task → orchestrator pla
 
 ## Future items (parked)
 
+- **Persistent run/result history (Phase 8, separate future branch).** Save project-scoped run IDs, child-session references, terminal states and structured reports so status/result lookup survives plugin reloads and OpenCode restarts. Reconcile interrupted/running records with actual child-session state without automatically replaying tasks or spending API credits; provide retention/delete controls and avoid storing secrets. This is a future-work item, not part of `context-handoffs` implementation or its completion criteria.
 - **Re-enable claude-mem in OpenCode.** It was disabled on 2026-10-08 because it is a V1 plugin and fails to load in V2. The file was moved to `~/.config/opencode/disabled-plugins/claude-mem.js` and the previous global config backed up to `~/.config/opencode/disabled-plugins/opencode.json.bak` (it used the V1 key `"plugin"`). Re-add it only once a V2-compatible claude-mem exists (`Plugin.define({ id, setup })`, listed under the `plugins` key); restoring the old file as-is will fail again.
-- **Upgrade OpenCode beyond 2.0.22** on a dedicated branch (e.g. `chore/opencode-2.0.25`): re-test, then update the pin.
+- **Plugin API dependency upgrade (separate future branch):** evaluate a newer `@opencode/plugin` API than the pinned 2.0.22, re-test against intended OpenCode runtimes and required capabilities, then update the dependency pin if approved. Installed-runtime acceptance on 2.2.0 does not itself upgrade or establish compatibility with every API version.
 - **Free models for trivial work:** check whether OpenCode's terms allow routing trivial read-only tasks to built-in agents on free models before considering it.
-- **Desktop interface:** revisit if OpenCode adds plugin support for the desktop app's UI.
+- **Desktop interface (separate future branch):** evaluate the now-documented native GUI-experimental plugin API for the primary normal-chat desktop experience. Keep the existing browser-workspace plan pending that evaluation; no GUI implementation or architecture change belongs to `context-handoffs`.
 
 ## Optional workflow controls
 

@@ -1,0 +1,15 @@
+{
+  "agent": "explorer",
+  "difficulty": "easy",
+  "handoff": {
+    "version": 1,
+    "objective": "Summarize the supplied README excerpt in one sentence without using tools or changing files.",
+    "files": [
+      { "path": "README.md", "content": "This project is an OpenCode orchestration plugin." }
+    ],
+    "findings": ["Caller supplied this excerpt; freshness has not been checked."],
+    "constraints": ["Use only the supplied excerpt; do not read or modify files."],
+    "previousResults": [],
+    "acceptanceChecks": ["Summary identifies an OpenCode orchestration plugin"]
+  }
+}
