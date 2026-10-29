@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./tui": "./src/tui.ts",
+    "./gui-experimental": "./dist/gui-experimental.cjs",
     "./rpc": "./src/rpc.ts",
     "./types": "./src/shared/types.ts"
   },
@@ -15,34 +16,41 @@
   },
   "files": [
     "src",
+    "dist",
     "scripts",
     ".opencode/agents",
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts src/tui.ts --outdir dist --target bun --format esm --external @opencode/plugin --external @opencode/plugin/tui",
+    "build": "bun run build:server && bun run build:gui",
+    "build:server": "bun build src/index.ts src/tui.ts --outdir dist --target bun --format esm --external @opencode/plugin --external @opencode/plugin/tui",
+    "build:gui": "vite build",
     "check": "bun run format:check && bun run typecheck && bun test && bun run build",
-    "format": "biome format --write src scripts test server.ts tui.ts package.json tsconfig.json biome.json opencode.jsonc examples",
-    "format:check": "biome format src scripts test server.ts tui.ts package.json tsconfig.json biome.json opencode.jsonc examples",
+    "format": "biome format --write src scripts test server.ts tui.ts vite.config.ts package.json tsconfig.json biome.json opencode.jsonc examples",
+    "format:check": "biome format src scripts test server.ts tui.ts vite.config.ts package.json tsconfig.json biome.json opencode.jsonc examples",
     "install:agents": "bun scripts/install-agents.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode/plugin": "2.0.22"
+    "@opencode/plugin": "2.2.0"
   },
   "peerDependencies": {
-    "@opentui/core": ">=0.5.14",
-    "@opentui/solid": ">=0.5.14",
-    "solid-js": "1.9.12"
+    "@opentui/core": "0.7.0",
+    "@opentui/solid": "0.7.0",
+    "solid-js": "1.9.15"
   },
   "devDependencies": {
     "@biomejs/biome": "2.2.4",
-    "@opentui/core": "0.5.14",
-    "@opentui/solid": "0.5.14",
+    "@opentui/core": "0.7.0",
+    "@opentui/solid": "0.7.0",
     "@types/bun": "1.2.22",
-    "solid-js": "1.9.12",
-    "typescript": "5.9.2"
+    "@opencode/theme": "2.2.0",
+    "electron": "44.9.1",
+    "solid-js": "1.9.15",
+    "typescript": "5.9.2",
+    "vite": "7.3.6",
+    "vite-plugin-solid": "2.11.10"
   },
   "engines": {
     "bun": ">=1.2.0"

@@ -153,6 +153,7 @@ test("RPC and TUI commands display output without dispatching or switching model
   let hookDisposed = false
   // This deliberately narrow integration fake fails if production touches a generation API.
   const context = {
+    tool: { transform: async () => ({ dispose: async () => {} }) },
     location: { directory: "/integration" },
     options: {},
     session: {
@@ -218,6 +219,10 @@ test("RPC and TUI commands display output without dispatching or switching model
         alert: async (value: { title: string; message: string }) => {
           output.push(value)
         },
+        confirm: async (value: { title: string; message: string }) => {
+          output.push(value)
+          return true
+        },
       },
     },
   } as unknown as TuiPlugin.Context)
@@ -226,15 +231,15 @@ test("RPC and TUI commands display output without dispatching or switching model
     "orchestration-route",
     "orchestration-run",
     "orchestration-policy",
+    "orchestration-handoff",
   ])
   await layer.commands?.[0]?.run("/orchestration-models set small openrouter/vendor/small")
   await layer.commands?.[1]?.run("/orchestration-route easy explain bun test --coverage")
-  expect(output).toHaveLength(2)
+  expect(output.length).toBeGreaterThanOrEqual(2)
   expect(locations).toEqual([{ directory: "/integration" }, { directory: "/integration" }])
-  expect(output[1]).toMatchObject({
-    title: "AI Orchestration",
-    message: expect.stringContaining("Routing preview only"),
-  })
+  expect(output[1]?.title).toStartWith("AI Orchestration")
+  expect(output.map((page) => page.message).join("\n")).toContain("Routing preview only")
+  expect(output.every((page) => page.title.startsWith("AI Orchestration"))).toBe(true)
   await cleanup?.()
   expect(disposed).toBe(true)
   expect(hookDisposed).toBe(true)

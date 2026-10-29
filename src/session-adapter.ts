@@ -105,7 +105,13 @@ export function createSessionAdapter(
       )
       const last = assistants[assistants.length - 1]
       if (session.outcome === "succeeded" && !error && last?.finish === "stop")
-        return { ok: true, text }
+        return {
+          ok: true,
+          text,
+          finalText: last.content
+            .flatMap((part) => (part.type === "text" ? [part.text] : []))
+            .join("\n"),
+        }
       if (session.outcome === "interrupted")
         return { ok: false, text: "Session interrupted.", failure: "cancelled" }
       const message =

@@ -16,6 +16,9 @@ function fixture() {
   let finish = "stop"
   let tool = false
   let waitError = false
+  let finalText = "done"
+  let interimText: string | undefined
+  const prompts: string[] = []
   const context = {
     location: { directory: "/test-project" },
     model: {
@@ -43,8 +46,9 @@ function fixture() {
         })
         return { id: "child-1" }
       },
-      prompt: async () => {
+      prompt: async (input: { text: string }) => {
         calls.push("prompt")
+        prompts.push(input.text)
       },
       wait: async () => {
         calls.push("wait")
@@ -52,10 +56,18 @@ function fixture() {
       },
       get: async () => ({ outcome }),
       context: async () => [
+        ...(interimText
+          ? [
+              {
+                type: "assistant",
+                content: [{ type: "text", text: interimText }, { type: "tool" }],
+              },
+            ]
+          : []),
         {
           type: "assistant",
           finish,
-          content: [{ type: "text", text: "done" }, ...(tool ? [{ type: "tool" }] : [])],
+          content: [{ type: "text", text: finalText }, ...(tool ? [{ type: "tool" }] : [])],
         },
       ],
       interrupt: async () => {
@@ -83,16 +95,21 @@ function fixture() {
     adapter,
     commands,
     engine,
+    prompts,
     change: (values: {
       outcome?: string
       finish?: string
       tool?: boolean
       waitError?: boolean
+      finalText?: string
+      interimText?: string
     }) => {
       outcome = values.outcome ?? outcome
       finish = values.finish ?? finish
       tool = values.tool ?? tool
       waitError = values.waitError ?? waitError
+      finalText = values.finalText ?? finalText
+      interimText = values.interimText ?? interimText
     },
   }
 }
@@ -112,6 +129,47 @@ test("real adapter API shape: preview and denied approval never prompt, approved
   expect(f.engine.status(prepared.id).state).toBe("completed")
   expect(f.calls).toEqual(["create", "prompt", "wait"])
   expect(await f.commands.runCommand(`status ${prepared.id}`)).toContain("child-1")
+})
+
+test("explicit handoff traverses the real adapter and parses final report after tool narration", async () => {
+  const f = fixture()
+  const handoff = {
+    version: 1,
+    objective: "Summarize supplied context",
+    files: [{ path: "README.md", content: "plugin excerpt" }],
+    findings: ["untrusted"],
+    constraints: ["Do not change files"],
+    previousResults: [],
+    acceptanceChecks: ["Identify plugin"],
+  }
+  const report = {
+    version: 1,
+    summary: "Plugin",
+    findings: [],
+    evidence: ["Read caller excerpt"],
+    checks: [{ check: "Identify plugin", status: "passed", details: "Summary says plugin" }],
+    limitations: ["No independent verification"],
+  }
+  f.change({
+    interimText: "I will inspect the supplied context.",
+    finalText: JSON.stringify(report),
+  })
+  const prepared = await f.commands.prepareHandoff(
+    JSON.stringify({ agent: "explorer", difficulty: "easy", handoff }),
+  )
+  expect(f.calls).toEqual([])
+  await f.commands.start(prepared.id)
+  for (let i = 0; i < 20 && f.engine.status(prepared.id).state === "running"; i++)
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  expect(f.calls).toEqual(["create", "prompt", "wait"])
+  expect(f.prompts[0]).toContain(JSON.stringify(handoff))
+  expect(f.prompts[0]).not.toContain("unrelated conversation")
+  expect(f.engine.handoffResult(prepared.id)).toMatchObject({
+    state: "completed",
+    report,
+    evidenceVerified: false,
+    attempts: [{ sessionID: "child-1" }],
+  })
 })
 
 test("truncation does not mean success; tool-bearing attempts never safely retry", async () => {
@@ -185,44 +243,56 @@ test("optional policies persist, default off, invalid nested policy rejects", as
 
 test("terminal confirmation dispatches only on explicit Run; cancel/escape dispatch nothing", async () => {
   type Layer = ReturnType<Parameters<TuiPlugin.Context["keymap"]["layer"]>[0]>
-  for (const approved of [false, undefined, true]) {
-    let layer: Layer = {}
-    const calls: string[] = []
-    await tui.setup({
-      options: { notifyOnLoad: false },
-      location: { directory: "/project" },
-      keymap: {
-        layer: (get: () => Layer) => {
-          layer = get()
+  for (const commandName of ["orchestration-run", "orchestration-handoff"])
+    for (const approved of [false, undefined, true]) {
+      let layer: Layer = {}
+      const calls: string[] = []
+      await tui.setup({
+        options: { notifyOnLoad: false },
+        location: { directory: "/project" },
+        keymap: {
+          layer: (get: () => Layer) => {
+            layer = get()
+          },
         },
-      },
-      client: {
-        rpc: () => ({
-          prepare: async () => {
-            calls.push("prepare")
-            return { id: "ticket", message: "Exact model approval" }
-          },
-          start: async (id: string) => {
-            expect(id).toBe("ticket")
-            calls.push("start")
-            return "running"
-          },
-          discard: async () => {
-            calls.push("discard")
-            return "cancelled"
-          },
-        }),
-      },
-      ui: {
-        router: { current: () => ({ type: "home" }) },
-        dialog: { confirm: async () => approved, alert: async () => undefined },
-      },
-    } as unknown as TuiPlugin.Context)
-    await layer.commands
-      ?.find((command) => command.slash?.name === "orchestration-run")
-      ?.run("/orchestration-run auto read README")
-    expect(calls).toEqual(["prepare", approved === true ? "start" : "discard"])
-  }
+        client: {
+          rpc: () => ({
+            prepare: async () => {
+              calls.push("prepare")
+              return { id: "ticket", message: "Exact model approval" }
+            },
+            handoff: async () => {
+              calls.push("handoff")
+              return { id: "ticket", message: "Full context approval" }
+            },
+            start: async (id: string) => {
+              expect(id).toBe("ticket")
+              calls.push("start")
+              return "running"
+            },
+            discard: async () => {
+              calls.push("discard")
+              return "cancelled"
+            },
+          }),
+        },
+        ui: {
+          router: { current: () => ({ type: "home" }) },
+          dialog: { confirm: async () => approved, alert: async () => undefined },
+        },
+      } as unknown as TuiPlugin.Context)
+      await layer.commands
+        ?.find((command) => command.slash?.name === commandName)
+        ?.run(
+          commandName === "orchestration-run"
+            ? "/orchestration-run auto read README"
+            : '/orchestration-handoff run {"example":"context"}',
+        )
+      expect(calls).toEqual([
+        commandName === "orchestration-run" ? "prepare" : "handoff",
+        approved === true ? "start" : "discard",
+      ])
+    }
 })
 
 test("image generation rejects locally while text diagrams remain supported", async () => {

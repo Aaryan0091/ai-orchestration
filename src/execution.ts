@@ -6,6 +6,13 @@ import {
   type RoutingConfig,
   type Selection,
 } from "./routing.ts"
+import {
+  handoffPrompt,
+  parseSpecialistReport,
+  validateHandoff,
+  type HandoffPackage,
+  type SpecialistReport,
+} from "./handoffs.ts"
 
 export type Capability = "text" | "tools" | "imageInput" | "imageOutput" | "reasoning"
 export class StopUnconfirmedError extends Error {
@@ -39,6 +46,7 @@ export interface ExecutionRequest {
   model?: Selection
   requiredCapabilities?: readonly Capability[]
   options?: ExecutionOptions
+  handoff?: HandoffPackage
 }
 export interface Assessment {
   difficulty: Difficulty
@@ -54,10 +62,13 @@ export interface ExecutionPlan {
   models: readonly Selection[]
   options: ExecutionOptions
   createdAt: number
+  handoff?: HandoffPackage
 }
 export interface ExecutionOutcome {
   ok: boolean
   text: string
+  /** Final assistant message only, excluding earlier tool narration. */
+  finalText?: string
   failure?: "model" | "verification" | "credentials" | "permission" | "cancelled" | "unknown"
   safeToRetry?: boolean
 }
@@ -72,6 +83,7 @@ export interface TaskRun {
   plan: ExecutionPlan
   attempts: Attempt[]
   result?: string
+  specialistReport?: SpecialistReport
 }
 export interface ExecutionHost {
   readConfig(): Promise<RoutingConfig>
@@ -192,6 +204,10 @@ export function createExecutionEngine(host: ExecutionHost) {
   }
 
   async function preview(request: ExecutionRequest): Promise<ExecutionPlan> {
+    request = clone(request)
+    const handoff = request.handoff === undefined ? undefined : validateHandoff(request.handoff)
+    if (handoff && request.task !== handoff.objective)
+      throw new Error("Handoff objective must match the task.")
     if (/\b(generate|create|draw|paint)\b.{0,35}\b(image|photo|picture)\b/i.test(request.task))
       throw new Error(
         "Image generation is not supported by this text-task runner. Use OpenCode's image tools directly.",
@@ -288,6 +304,7 @@ export function createExecutionEngine(host: ExecutionHost) {
       models: unique,
       options,
       createdAt: now(),
+      ...(handoff ? { handoff } : {}),
     }
     for (const [planID, saved] of plans) {
       if (now() - saved.createdAt > 10 * 60 * 1000) plans.delete(planID)
@@ -325,12 +342,30 @@ export function createExecutionEngine(host: ExecutionHost) {
         controller.signal.throwIfAborted()
         attempt.outcome = await host.executeSession({
           sessionID: attempt.sessionID,
-          task: run.plan.task,
+          task: run.plan.handoff ? handoffPrompt(run.plan.handoff) : run.plan.task,
           signal: controller.signal,
         })
         controller.signal.throwIfAborted()
         run.result = attempt.outcome.text
         if (attempt.outcome.ok) {
+          if (run.plan.handoff) {
+            try {
+              run.specialistReport = parseSpecialistReport(
+                attempt.outcome.finalText ?? attempt.outcome.text,
+                run.plan.handoff,
+              )
+            } catch (error) {
+              attempt.outcome = {
+                ok: false,
+                text: error instanceof Error ? error.message : "Invalid report.",
+                failure: "verification",
+                safeToRetry: false,
+              }
+              run.result = attempt.outcome.text
+              run.state = "failed"
+              return
+            }
+          }
           run.state = "completed"
           return
         }
@@ -411,6 +446,21 @@ export function createExecutionEngine(host: ExecutionHost) {
     start,
     status,
     cancel,
+    handoffResult(runID: string) {
+      const run = status(runID)
+      if (!run.plan.handoff) throw new Error("This run has no handoff package.")
+      return {
+        version: 1 as const,
+        runID: run.id,
+        state: run.state,
+        agent: run.plan.agent,
+        objective: run.plan.handoff.objective,
+        attempts: run.attempts.map(({ model, sessionID }) => ({ model, sessionID })),
+        report: run.specialistReport ?? null,
+        evidenceVerified: false as const,
+        ...(run.state !== "completed" && run.result ? { diagnostic: run.result } : {}),
+      }
+    },
     discard(planID: string) {
       plans.delete(planID)
     },

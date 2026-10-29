@@ -1,4 +1,5 @@
-import { Rpc } from "@opencode/plugin"
+import { Rpc } from "@opencode/plugin/rpc"
+import { HANDOFF_ERROR } from "./handoffs.ts"
 
 /**
  * Official plugin guide: https://opencode.ai/v2/docs/build/plugins/
@@ -23,6 +24,7 @@ const failure = {
   additionalProperties: false,
 } as const
 const textReply = { anyOf: [text, failure] } as const
+export const routingFailureSchema = failure
 export const routingRpc = Rpc.define({
   id: "ai-orchestration.routing",
   methods: {
@@ -32,6 +34,21 @@ export const routingRpc = Rpc.define({
       input: text,
       output: {
         anyOf: [
+          {
+            type: "object",
+            properties: { id: text, message: text },
+            required: ["id", "message"],
+            additionalProperties: false,
+          },
+          failure,
+        ],
+      },
+    },
+    handoff: {
+      input: { type: "string", maxLength: 60010 },
+      output: {
+        anyOf: [
+          text,
           {
             type: "object",
             properties: { id: text, message: text },
@@ -58,6 +75,10 @@ export interface RoutingFailure {
 // Only known local validation text crosses the boundary. Provider/transport
 // objects, stack traces and arbitrary exception messages may contain credentials.
 const safeMessages = new Set([
+  HANDOFF_ERROR,
+  "Handoff objective must match the task.",
+  "This run has no handoff package.",
+  "Usage: preview JSON | run JSON; paste the complete handoff request object.",
   "Choose small, mid, big or orchestrator.",
   "Use a listed provider/model ID; model IDs may contain slashes.",
   "Invalid model variant.",
@@ -99,7 +120,7 @@ const safeMessages = new Set([
   "Supply a provider/model after --model.",
   "Usage: easy|medium|hard [--model provider/model[#variant]] TASK",
   "Usage: auto|easy|medium|hard [--agent ROLE] [--model provider/model#variant] TASK",
-  "Usage: status RUN_ID | cancel RUN_ID; to start use /orchestration-run auto TASK",
+  "Usage: status RUN_ID | cancel RUN_ID | result RUN_ID; to start use /orchestration-run auto TASK",
   "Usage: reasoning easy|medium|hard VARIANT|off",
   "Usage: fallback small|mid|big provider/model#variant|off",
   "Usage: escalation on|off",

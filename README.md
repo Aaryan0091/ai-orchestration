@@ -17,9 +17,9 @@ Phase 1 is intentionally small. It provides:
 - project-scoped model selections for small, mid, big and orchestrator;
 - local slash commands for connected-model inventory, selections and task routing previews.
 
-It can now run one approved task in a separate agent session, with rules-based difficulty and capability checks. Full multi-step orchestration, context handoffs and independent verification remain future work.
+It can now run one approved task in a separate agent session, with rules-based difficulty and capability checks, explicit context handoffs and structured specialist reports. Full multi-step orchestration, automatic context collection and independent verification remain future work.
 
-See [project decisions](DECISIONS.md) for user-controlled model assignments, planned context handoffs, and verification results.
+See [project decisions](DECISIONS.md) for user-controlled model assignments, explicit handoff boundaries, and verification results.
 
 The [optional workflow controls plan](PLAN.md) describes task-based model routing and nine separately selectable enhancements for future implementation.
 
@@ -112,7 +112,43 @@ These controls are separately opt-in and project-scoped; default is no reasoning
 
 Reasoning uses OpenCode's actual named variants, not invented universal effort levels. A per-task `--model PROVIDER/MODEL#VARIANT` wins over the difficulty default. Fallback selects one alternative in the same tier; escalation then considers your configured higher tiers. Retries are bounded to 0–3, revalidate all candidates before approval and repeat **only this one task**. Automatic replay is limited to confirmed pre-generation provider failures without tool activity or output; permission, credentials, cancellation and ambiguous failures never retry. No unsafe side-effect replay control is exposed. Long tasks, edits and verification failures require inspection/new approval rather than automatic repetition. Policies affect newly prepared runs; previously approved tickets bind their exact task/models/policy, are single-use and expire after ten minutes.
 
-Automatic/Guided/Manual options still describe the future workflow modes; none bypasses the explicit single-task approval here. There is no graph scheduler, full context-transfer system or automatic verifier in this slice.
+Automatic/Guided/Manual options still describe the future workflow modes; none bypasses the explicit single-task approval here. There is no graph scheduler, automatic context collector or automatic verifier in this slice.
+
+## Explicit context handoffs
+
+`/orchestration-handoff` sends a caller-selected context package to one specialist through the same isolated, model-routed, approved runner. It does not copy an active conversation or secretly read files. The package contains an objective, project-relative file references and optional excerpts, findings, constraints, prior run summaries, and acceptance checks. See the complete [example request](examples/handoff.json).
+
+Paste this **inside OpenCode chat** for a free local preview. JSON's quotes are part of its syntax; paste the complete command including the entire object:
+
+```text
+/orchestration-handoff preview {"agent":"explorer","difficulty":"easy","handoff":{"version":1,"objective":"Summarize the supplied excerpt in one sentence without tools.","files":[{"path":"README.md","content":"This is an OpenCode orchestration plugin."}],"findings":[],"constraints":["Do not read or change files; use only the supplied excerpt."],"previousResults":[],"acceptanceChecks":["Summary identifies an OpenCode orchestration plugin"]}}
+```
+
+To run, use the same command with `run` instead of `preview`, review the **full** context/model warning, then choose Run task. Cancel/Escape starts nothing. Running may spend API credits. Model overrides use an optional top-level `"model":"provider/model#variant"`, with an exact connected inventory ID. Each package is cloned before asynchronous work and bound to a single-use, expiring approval; later edits cannot change that run.
+
+Use the returned ID:
+
+Long previews, reports and approvals are split into terminal-sized pages so the bottom and buttons stay visible. Use **Next** and **Previous** (arrow keys to select, Enter to activate); **Esc** closes a preview or cancels approval. **Run task** is offered only on the last approval page, after the complete context and cost warning. Resizing during a paged dialog reflows it from page one; it never approves a task. Below 48 columns × 20 rows, enlarge the terminal and retry; approval is blocked rather than hidden. Short messages retain the normal single dialog. Restart the OpenCode terminal after updating the plugin to use the new dialogs.
+
+Dialog overflow regression (2026-10-22): all 86 tests / 617 assertions, types, formatting, build and whitespace checks passed. An isolated OpenCode 2.1.2 TUI fixture at 80×24 displayed Next/Previous, reached the final content/cost warning, showed Run task only on the final approval page, and returned cancellation after Escape there. The fixture used local synthetic text only; no provider generation or user settings were used. This checks pagination, not a fresh real-model handoff response.
+
+```text
+/orchestration-run status RUN_ID
+/orchestration-run result RUN_ID
+/orchestration-run cancel RUN_ID
+```
+
+`result` returns JSON with run state, objective, specialist, attempt models/session IDs and a parsed report: summary, findings, evidence, acceptance-check statuses and limitations. `evidenceVerified` is always false: these are **untrusted specialist claims**, not independent verification. Completed means the child finished and returned a valid report, not that all checks passed. Running/failed/cancelled results have no fabricated report. Invalid or incomplete report JSON fails the run without automatic replay; inspect the child session for original output. Earlier assistant/tool narration is excluded when parsing the final report.
+
+The orchestrator can read a supplied existing run ID through the read-only `orchestration_handoff_result` tool, subject to the narrow `orchestration_result` ask permission. The tool explicitly awaits the host's native `permission.assert` for that exact run ID before looking up a report: its permission label alone does not request approval. Rejection, cancellation or an aborted call returns no report. Hosts without this capability fail closed for the tool; the explicit `/orchestration-run result RUN_ID` command remains available. Other agents are rejected. The tool sees only this project's in-memory runs; it cannot prepare, approve, start, or resume work. To pass findings onwards, explicitly select a previous report's summary and run ID into a new package's `previousResults`, then preview/approve that new handoff. This is not an automatic orchestrator loop or dependency scheduler.
+
+Safety/limits: unknown JSON fields are rejected; no custom permission/settings fields are accepted. The package is limited to 48,000 serialized characters, 20 entries per list, 20,000 characters for the objective, 8,000 per excerpt, 4,000 per finding/constraint/check/previous summary, and 500 per relative path. Each acceptance check must be unique. The command request is limited to 60,000 characters. The plugin adds no context database; run lookup remains in memory, but prompts/packages/reports are part of normal OpenCode child sessions and follow the host's storage/retention. File references and natural-language constraints **do not create a filesystem sandbox**: the chosen agent retains its existing OpenCode permissions. Verify freshness yourself and review all supplied context for secrets before sending it to a provider. Independent checking, automatic stale-context detection and recovery after restart are not implemented.
+
+Developer checks: `bun run check` covers the complete suite. `bun test test/handoffs.test.ts test/execution-integration.test.ts test/rpc-errors.test.ts` focuses on handoff validation, immutable context, report/provenance retrieval, read-tool restrictions, actual adapter-shaped delivery, RPC errors, cancellation and approval. These deterministic fixtures do not prove a fresh real-provider response or interactive dialog layout; perform the preview/cancel/run/status/result sequence above when ready to approve a provider request.
+
+Final branch acceptance (2026-10-28): **89 tests / 655 assertions**, types, formatting, build, working-tree and staged Git whitespace checks passed. An isolated real OpenCode **2.2.0** host using a synthetic localhost HTTP model fixture completed handoff run `339e189d-d43c-4818-8d15-06f7a0021f33`. Its actual result RPC returned `completed`, `HANDOFF_CHECK_OK` and `evidenceVerified:false`; reading it again made no extra generation request. A fixture-driven Orchestrator tool call produced a real pending native `orchestration_result` permission for that exact run ID. Rejection withheld the report; a separate one-time approval returned it, and an Explorer call was blocked. All seven model requests went to the local fixture, not a paid provider. Native permission replies were tested through the API, not by clicking the interactive TUI prompt. The owned server and fixture were stopped; no user credentials/global settings were used or changed and no app upgrade was performed. Evidence remains under `/private/tmp/handoff-final.tVS373/` (`evidence.json`, redacted `server-output.txt`). This verifies host/plugin transport and permission enforcement, not a fresh real-provider answer, an independent verifier, or the full future workflow.
+
+Historical loading check (2026-10-22): all **78 tests (349 assertions)**, formatting, types, build and Git whitespace checks passed. Independently, the installed OpenCode CLI **2.1.2** loaded the plugin (including its awaited tool transform) in an isolated localhost server under `/private/tmp/handoff-runtime-NHDBdk`. Actual handoff RPC requests rejected an invalid payload with the handoff validation error and returned the actionable missing-small-tier error for a valid preview; an unknown result lookup returned Unknown task run. The session list remained empty before and after. No provider credentials or generation were used, and the server was stopped. That check covered loading/local validation only; the later final acceptance above covers result retrieval and native permission enforcement. Neither check establishes a new real-provider handoff response or compatibility with every OpenCode release.
 
 This runner transports text tasks only, not attached images/files or generated media. Image-generation requests are rejected locally; ASCII/Mermaid text explanations remain supported. Use OpenCode's media tools directly for images.
 
