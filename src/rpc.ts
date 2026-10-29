@@ -1,4 +1,4 @@
-import { Rpc } from "@opencode/plugin"
+import { Rpc } from "@opencode/plugin/rpc"
 import { HANDOFF_ERROR } from "./handoffs.ts"
 
 /**
@@ -24,6 +24,7 @@ const failure = {
   additionalProperties: false,
 } as const
 const textReply = { anyOf: [text, failure] } as const
+export const routingFailureSchema = failure
 export const routingRpc = Rpc.define({
   id: "ai-orchestration.routing",
   methods: {

@@ -111,6 +111,7 @@ test("all server RPC handlers return portable application failures, not opaque e
 test("server releases result tool and retry guard on registration failure or cleanup failure", async () => {
   for (const failRegistration of [true, false]) {
     const disposed: string[] = []
+    let toolCount = 0
     const context = {
       location: { directory: "/cleanup" },
       options: {},
@@ -123,18 +124,21 @@ test("server releases result tool and retry guard on registration failure or cle
         }),
       },
       tool: {
-        transform: async () => ({
-          dispose: async () => {
-            disposed.push("result-tool")
-          },
-        }),
+        transform: async () => {
+          const name = toolCount++ === 0 ? "result-tool" : "desktop-tools"
+          return {
+            dispose: async () => {
+              disposed.push(name)
+            },
+          }
+        },
       },
       rpc: {
-        register: async () => {
+        register: async (definition: { id: string }) => {
           if (failRegistration) throw new Error("registration failed")
           return {
             dispose: async () => {
-              disposed.push("rpc")
+              disposed.push(definition.id === "ai-orchestration.desktop" ? "desktop-rpc" : "rpc")
               throw new Error("cleanup failed")
             },
           }
@@ -147,7 +151,9 @@ test("server releases result tool and retry guard on registration failure or cle
       await expect(cleanup?.()).rejects.toThrow("cleanup failed")
     }
     expect(disposed).toEqual(
-      failRegistration ? ["result-tool", "retry"] : ["rpc", "result-tool", "retry"],
+      failRegistration
+        ? ["desktop-tools", "result-tool", "retry"]
+        : ["rpc", "desktop-rpc", "desktop-tools", "result-tool", "retry"],
     )
   }
 })

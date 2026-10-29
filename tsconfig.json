@@ -5,6 +5,8 @@
     "forceConsistentCasingInFileNames": true,
     "module": "Preserve",
     "moduleDetection": "force",
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
     "noEmit": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
@@ -15,5 +17,14 @@
     "target": "ES2022",
     "types": ["bun"]
   },
-  "include": ["scripts/**/*.ts", "src/**/*.ts", "test/**/*.ts", "server.ts", "tui.ts"]
+  "include": [
+    "scripts/**/*.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "test/**/*.ts",
+    "test/**/*.tsx",
+    "server.ts",
+    "tui.ts",
+    "vite.config.ts"
+  ]
 }
