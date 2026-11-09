@@ -18,6 +18,7 @@ import {
 } from "./desktop-rpc.ts"
 import {
   createDesktopActions,
+  createLatestRead,
   createReviewDecision,
   sameScope,
   type DesktopScope,
@@ -53,6 +54,7 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
   const [state, setState] = createSignal<DesktopState>()
   const [models, setModels] = createSignal<DesktopModels>()
   const [run, setRun] = createSignal<DesktopRun>()
+  const [selectedRunID, setSelectedRunID] = createSignal<string>()
   const [loading, setLoading] = createSignal(false)
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal("")
@@ -62,6 +64,9 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
   const [selection, setSelection] = createSignal("")
   let generation = 0
   let disposed = false
+  const stateRead = createLatestRead()
+  const modelsRead = createLatestRead()
+  const resultRead = createLatestRead()
   const current = () => {
     const mounted = ctx.sessions.current()
     return mounted?.key === props.session.key ? scopeOf(mounted) : undefined
@@ -76,34 +81,47 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
       signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(15_000)]),
     })
   })
-  async function refresh(scope = current()) {
+  async function refresh(scope = current(), refreshResult = false) {
     if (!scope) return
     const version = generation
+    const latest = stateRead()
     setLoading(true)
     try {
       const next = await actions.state(scope)
-      if (!disposed && version === generation) {
+      if (!disposed && version === generation && latest()) {
         setState(next)
         setError("")
+        const selected = selectedRunID()
+        if (selected) {
+          const row = next.runs.find((item) => item.id === selected)
+          if (!row) {
+            resultRead()
+            setSelectedRunID(undefined)
+            setRun(undefined)
+          } else if (refreshResult || (run()?.id === selected && run()?.state !== row.state)) {
+            void inspect(selected, true)
+          }
+        }
       }
     } catch (cause) {
-      if (!disposed && version === generation) setError(readable(cause))
+      if (!disposed && version === generation && latest()) setError(readable(cause))
     } finally {
-      if (!disposed && version === generation) setLoading(false)
+      if (!disposed && version === generation && latest()) setLoading(false)
     }
   }
   async function loadModels(page = 1) {
     const scope = current()
     if (!scope) return
     const version = generation
+    const latest = modelsRead()
     setBusy(true)
     try {
       const value = await actions.models(scope, query(), page)
-      if (!disposed && version === generation) setModels(value)
+      if (!disposed && version === generation && latest()) setModels(value)
     } catch (cause) {
-      if (!disposed && version === generation) setError(readable(cause))
+      if (!disposed && version === generation && latest()) setError(readable(cause))
     } finally {
-      if (!disposed && version === generation) setBusy(false)
+      if (!disposed && version === generation && latest()) setBusy(false)
     }
   }
   function review(scope: DesktopScope, ticket: TicketPreview) {
@@ -111,7 +129,7 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
     ctx.dialogs.open((dialog) => {
       const [submitting, setSubmitting] = createSignal(false)
       const [failure, setFailure] = createSignal("")
-      let finished = false
+      const [finished, setFinished] = createSignal(false)
       const decision = createReviewDecision({
         approve: () => actions.approve(scope, ticket),
         discard: () => actions.discard(scope, ticket.id),
@@ -123,22 +141,23 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
         if (!sameScope(current(), scope)) dialog.close()
       })
       async function approve() {
-        if (submitting() || finished) return
+        if (submitting() || finished()) return
         setSubmitting(true)
         try {
           const response = await decision.approve()
           if (!response) return
-          finished = true
+          setFinished(true)
           dialog.close()
           if (!disposed && sameScope(current(), scope)) {
             setNotice(response.message)
+            if (response.kind === "handoff" && response.runID) void inspect(response.runID)
             await refresh(scope)
             await loadModels()
           }
         } catch (cause) {
           // A response can be lost after the server consumes the ticket. Do not
           // offer an automatic retry of a potentially billable action.
-          finished = true
+          setFinished(true)
           setFailure(
             `${readable(cause)} Refresh the original chat’s runs before preparing another request.`,
           )
@@ -159,7 +178,7 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
               <ctx.ui.Button
                 variant={ticket.kind === "cancel" ? "danger" : "contrast"}
                 busy={submitting()}
-                disabled={finished || !sameScope(current(), scope)}
+                disabled={finished() || !sameScope(current(), scope)}
                 onClick={() => void approve()}
               >
                 {ticket.kind === "handoff"
@@ -194,9 +213,9 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
     try {
       review(scope, await actions.review(scope, id))
     } catch (cause) {
-      setError(readable(cause))
+      if (!disposed && sameScope(current(), scope)) setError(readable(cause))
     } finally {
-      if (!disposed) setBusy(false)
+      if (!disposed && sameScope(current(), scope)) setBusy(false)
     }
   }
   async function proposeModel(reset = false) {
@@ -206,19 +225,25 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
     try {
       review(scope, await actions.proposeModel(scope, slot(), reset ? null : selection().trim()))
     } catch (cause) {
-      setError(readable(cause))
+      if (!disposed && sameScope(current(), scope)) setError(readable(cause))
     } finally {
-      if (!disposed) setBusy(false)
+      if (!disposed && sameScope(current(), scope)) setBusy(false)
     }
   }
-  async function inspect(runID: string) {
+  async function inspect(runID: string, keepDetails = false) {
     const scope = current()
     if (!scope) return
+    const version = generation
+    const latest = resultRead()
+    setSelectedRunID(runID)
+    if (!keepDetails || run()?.id !== runID) setRun(undefined)
     try {
       const result = await actions.run(scope, runID)
-      if (!disposed) setRun(result)
+      if (!disposed && version === generation && latest() && sameScope(current(), scope))
+        setRun(result)
     } catch (cause) {
-      if (!disposed) setError(readable(cause))
+      if (!disposed && version === generation && latest() && sameScope(current(), scope))
+        setError(readable(cause))
     }
   }
   async function cancel(runID: string) {
@@ -228,9 +253,9 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
     try {
       review(scope, await actions.proposeCancel(scope, runID))
     } catch (cause) {
-      setError(readable(cause))
+      if (!disposed && sameScope(current(), scope)) setError(readable(cause))
     } finally {
-      if (!disposed) setBusy(false)
+      if (!disposed && sameScope(current(), scope)) setBusy(false)
     }
   }
   createEffect(() => {
@@ -243,8 +268,11 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
     setState(undefined)
     setModels(undefined)
     setRun(undefined)
+    setSelectedRunID(undefined)
     setError("")
     setNotice("")
+    setBusy(false)
+    setLoading(false)
     setSelection("")
     setQuery("")
     if (!scope) return
@@ -293,7 +321,11 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
             Ask Orchestrator in chat to prepare a task. Review it here before it runs.
           </p>
         </div>
-        <ctx.ui.Button variant="ghost" busy={loading()} onClick={() => void refresh()}>
+        <ctx.ui.Button
+          variant="ghost"
+          busy={loading()}
+          onClick={() => void refresh(current(), true)}
+        >
           Refresh
         </ctx.ui.Button>
       </header>
@@ -471,6 +503,7 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
                 <p class="oc-orchestration-muted">
                   {item.agent} · {item.state}
                 </p>
+                <p class="oc-orchestration-muted">Run ID: {item.id}</p>
                 <div class="oc-orchestration-actions">
                   <ctx.ui.Button disabled={busy()} onClick={() => void inspect(item.id)}>
                     View result
@@ -485,22 +518,24 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
                     </ctx.ui.Button>
                   </Show>
                 </div>
+                <Show
+                  when={selectedRunID() === item.id && run()?.id === item.id ? run() : undefined}
+                >
+                  {(value) => (
+                    <div class="oc-orchestration-result">
+                      <h4>Run details · {value().state}</h4>
+                      <p>Specialist evidence is self-reported, not independent verification.</p>
+                      <pre class="oc-orchestration-preview">
+                        {value().summary}
+                        {"\n\n"}
+                        {value().result}
+                      </pre>
+                    </div>
+                  )}
+                </Show>
               </div>
             )}
           </For>
-          <Show when={run()}>
-            {(value) => (
-              <div class="oc-orchestration-result">
-                <h4>Run details · {value().state}</h4>
-                <p>Specialist evidence is self-reported, not independent verification.</p>
-                <pre class="oc-orchestration-preview">
-                  {value().summary}
-                  {"\n\n"}
-                  {value().result}
-                </pre>
-              </div>
-            )}
-          </Show>
         </section>
       </Show>
     </section>
@@ -556,22 +591,23 @@ export default Plugin.define({
       if (!session || !scope) return
       const client = session.server.client
       const known = new Set<string>()
+      const stateRead = createLatestRead()
       let active = true
       async function reconcile() {
+        const latest = stateRead()
         try {
           const value = unwrapRoutingReply(
-            await client
-              .rpc(desktopRpc)
-              .state(
-                { sessionID: scope!.sessionID },
-                {
-                  location: { directory: scope!.directory },
-                  signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(10_000)]),
-                },
-              ),
+            await client.rpc(desktopRpc).state(
+              { sessionID: scope!.sessionID },
+              {
+                location: { directory: scope!.directory },
+                signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(10_000)]),
+              },
+            ),
           ) as DesktopState
           if (
             !active ||
+            !latest() ||
             ctx.signal.aborted ||
             !sameScope(scopeOf(ctx.sessions.current()), scope) ||
             value.sessionID !== scope!.sessionID ||

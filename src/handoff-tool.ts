@@ -38,7 +38,7 @@ export function registerHandoffResultTool(
         required: ["runID"],
         additionalProperties: false,
       },
-      options: { permission: "orchestration_result" },
+      options: { codemode: false, permission: "orchestration_result" },
       async execute(input, call) {
         if (call.agent !== "orchestrator")
           return {

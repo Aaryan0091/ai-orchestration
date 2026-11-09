@@ -29,6 +29,9 @@ export function registerDesktopTools(context: Pick<Plugin.Context, "tool">, cont
     const empty = { type: "object", properties: {}, additionalProperties: false } as const
     editor.add({
       name: "orchestration_prepare_handoff",
+      // Agent instructions call these tools directly. The host defaults to
+      // Code Mode, where direct calls otherwise fail with "No tool named".
+      options: { codemode: false },
       description:
         "Propose one specialist task from normal chat. Supply a bounded handoff with objective, explicit context and acceptance checks. Returns a frozen preview for the user's native Desktop review panel; does not start an agent or approve spending. Tell the user to review it in Orchestration controls. No automatic file/history collection.",
       input: {
@@ -57,6 +60,7 @@ export function registerDesktopTools(context: Pick<Plugin.Context, "tool">, cont
     })
     editor.add({
       name: "orchestration_prepare_model_change",
+      options: { codemode: false },
       description:
         "Propose changing one saved project model tier. Use an exact connected provider/model#variant ID or null to clear the tier. Desktop user approval is required; proposing saves nothing, starts no work and never changes the current chat model.",
       input: {
@@ -87,6 +91,7 @@ export function registerDesktopTools(context: Pick<Plugin.Context, "tool">, cont
     })
     editor.add({
       name: "orchestration_prepare_cancel",
+      options: { codemode: false },
       description:
         "Propose cancelling an existing specialist run belonging to this chat. The Desktop user must approve the cancellation. This tool does not interrupt or restart anything itself.",
       input: {
@@ -115,6 +120,7 @@ export function registerDesktopTools(context: Pick<Plugin.Context, "tool">, cont
     })
     editor.add({
       name: "orchestration_desktop_status",
+      options: { codemode: false },
       description:
         "Read pending proposals and specialist run status for this chat without generation, approval or settings changes. Completed means a session/report finished, not independent verification. Use orchestration_handoff_result with its native permission check to retrieve a report by returned run ID.",
       input: empty,
@@ -134,6 +140,7 @@ export function registerDesktopTools(context: Pick<Plugin.Context, "tool">, cont
     })
     editor.add({
       name: "orchestration_project_models",
+      options: { codemode: false },
       description:
         "Read saved project model tiers and search eligible connected model IDs. No provider generation or settings change. Use page/query to inspect bounded results before proposing a model preference.",
       input: {

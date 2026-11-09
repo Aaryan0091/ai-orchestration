@@ -1,13 +1,16 @@
 # OpenCode Orchestrator
 
-An early OpenCode V2 plugin foundation for a user-controlled, multi-agent workspace. It will coordinate specialized agents, route work to user-selected models, verify results, and produce terminal-friendly visual explanations.
+An OpenCode V2 plugin for a user-controlled, multi-agent workspace. The main experience is normal OpenCode Desktop chat with native review controls; the terminal remains supported. Full automatic coordination, independent verification and visual explanations are later work.
 
 ## Current status
 
-Phase 1 is intentionally small. It provides:
+The current `desktop-chat-controls` slice adds a native Orchestration panel around the existing approved, single-task runner. It provides:
 
 - a V2 server plugin entry at `src/index.ts`;
 - a V2 terminal plugin entry at `src/tui.ts`;
+- a native Solid Desktop GUI entry at `src/gui.tsx`, exported as the prebuilt `dist/gui-experimental.cjs` bundle;
+- Orchestrator chat tools that prepare task/model/cancellation requests, but cannot approve or start them;
+- current-chat pending approvals, project model preferences, run status and result inspection through native controls;
 - shared routing and agent contracts;
 - Automatic, Guided, and Manual option parsing (Guided is the default);
 - eight starter agent profiles under `.opencode/agents`;
@@ -17,7 +20,7 @@ Phase 1 is intentionally small. It provides:
 - project-scoped model selections for small, mid, big and orchestrator;
 - local slash commands for connected-model inventory, selections and task routing previews.
 
-It can now run one approved task in a separate agent session, with rules-based difficulty and capability checks, explicit context handoffs and structured specialist reports. Full multi-step orchestration, automatic context collection and independent verification remain future work.
+It can run one approved task in a separate agent session, with rules-based difficulty and capability checks, explicit context handoffs and structured specialist reports. The Desktop controls reuse that runner and the same project settings; they do not introduce a second execution engine. Full multi-step orchestration, automatic context collection, durable run history and independent verification remain future work.
 
 See [project decisions](DECISIONS.md) for user-controlled model assignments, explicit handoff boundaries, and verification results.
 
@@ -26,10 +29,75 @@ The [optional workflow controls plan](PLAN.md) describes task-based model routin
 ## Requirements
 
 - Bun 1.2 or newer
-- OpenCode V2 compatible with `@opencode/plugin` 2.0.22
+- OpenCode V2 with the native GUI-experimental plugin API; this project's SDK dependency is pinned to exact **`@opencode/plugin` 2.2.0**
+- The native GUI bundle built with `bun run build` before loading it in Desktop
 - At least one provider connected through OpenCode
 
 This plugin never asks for or stores provider API keys. Connect providers with OpenCode itself.
+
+## Use normal Desktop chat
+
+### Build and enable the native part
+
+From the repository, install the declared dependencies and build all parts:
+
+```sh
+bun install
+bun run build
+```
+
+The GUI uses the official `@opencode/plugin/gui/vite` preset and must be a prebuilt CommonJS bundle at `dist/gui-experimental.cjs`. Desktop does not load `src/gui.tsx` as the GUI entry. The package exports `./gui-experimental`; server, TUI and RPC exports remain separate. A checkout or published package missing the bundle cannot provide the native controls.
+
+The project's `opencode.jsonc` loads the server/TUI. Under the documented 2.2.0 loading contract, Desktop loads GUI parts from its **global** `opencode.json(c)` plugin entries, not merely from a project's entry. If you choose to enable this development checkout, add or reuse its entry in your existing global plugin list (normally `~/.config/opencode/opencode.jsonc`). Preserve existing settings and plugins; do not create a duplicate entry. We do not edit your global configuration automatically.
+
+```jsonc
+{
+  "plugins": [
+    { "package": "/Users/aaryangupta/Desktop/AI Orchestration " }
+  ]
+}
+```
+
+The checkout path is pasted inside the JSON quotes; keep its trailing space for this checkout. For another checkout, replace it with that folder's absolute path. Reload/restart Desktop after building/enabling the GUI, open this project, and select the **Orchestrator** agent in a project chat. In another project, install the bundled agent profiles first as described below. Connecting a provider and enabling a global plugin are user choices, not actions performed by this repository's build.
+
+### Prepare, review and inspect
+
+1. Open the command **Open Orchestration controls**, use the session panel's **Orchestration** entry, or select the Desktop `/orchestration` command. The panel belongs to the active project chat and server.
+2. Under **Project models**, choose a Tier, search/select an exact connected model/variant, then select **Review change**. Review the frozen request and select **Apply model change** to save it, or Cancel to change nothing. **Reset tier** also prepares a change for approval. These preferences affect future plugin tasks, not the current chat's model.
+3. Ask Orchestrator normally, for example:
+
+```text
+Prepare an easy Explorer task that returns DESKTOP_CHECK_OK using only that supplied marker, without reading or changing files. Let me review it before it runs.
+```
+
+4. The chat tool prepares a bounded request. In **Pending approval**, choose **Review**, read the complete scrollable task/context/models/cost warning, then select **Run task** only if you approve. Cancel or dismiss the review to discard the unapproved ticket. There is no model-callable approve/start tool. Asking the Orchestrator is still a normal model request and can use your provider quota; preparing or viewing a ticket does not itself start a specialist request. Approving a task can spend API credits.
+5. Under **This chat's runs**, use **View result** or **Refresh** to inspect state and the structured report. Completion means the child returned a valid report, not that an independent verifier proved it correct. Evidence remains self-reported. For a running task, **Review cancellation** opens a separate frozen request; **Cancel running task** confirms it. Cancelling a review is not the same as cancelling an already-running task.
+
+The Orchestrator tools are `orchestration_project_models`, `orchestration_prepare_handoff`, `orchestration_prepare_model_change`, `orchestration_prepare_cancel` and `orchestration_desktop_status`. Existing report retrieval remains permission-gated. Normal informational chat need not use a specialist; the plugin does not disable OpenCode's other native capabilities.
+
+Requests are bounded, expiring, single-use and tied to their origin chat/project. The GUI captures the server/chat identity and rejects stale replies, duplicate actions and approvals after switching context. Remote chats use their selected server, never an implicit local fallback. Reconnect or return to the original chat and refresh to reconcile pending requests. If an approval reply is lost, inspect that chat's runs before preparing another request; the first request may already have been consumed.
+
+Current scope: the panel shows this chat's Desktop-controlled runs, not a full agent workspace or every terminal-created run. Requests/run ownership are in memory and disappear on plugin restart; no automatic replay occurs. Project model preferences persist separately. A successful bundle or mocked component test is not a native Desktop interaction pass; the current verification boundary is recorded below.
+
+Developer checks: `bun run check` runs formatting, types, all tests and the server/TUI/native GUI builds. `bun test test/desktop-rpc-integration.test.ts test/gui-controller.test.ts test/gui-packaging.test.ts` focuses on native-control RPC integration, GUI request/decision logic and bundle packaging; those fixtures alone do not prove actual Desktop loading or visual interaction.
+
+### Verification and remaining native check
+
+Latest checkpoint (2026-11-07): **115 tests / 816 assertions**, formatting, strict types and all builds pass. User screenshots now confirm native panel loading, project-scoped model review/apply and the saved selection surviving Refresh. The chat handoff initially failed with `No tool named`: OpenCode 2.2.5 defaults plugin tools to Code Mode, while our Orchestrator instructions call them directly. All six agent-facing orchestration tools now explicitly use `options.codemode: false`; the result tool retains its permission assertion. No approve/start tool was added.
+
+An isolated real **OpenCode 2.2.5** server and localhost HTTP model fixture verified the native model tool list, actual chat tool execution into a pending handoff, discard without specialist dispatch, then approval of a separate handoff and one specialist generation returning `DESKTOP_CHECK_OK`. Run `ba86c953-8065-40cc-aa46-0ae7d3be29eb` completed with unverified report evidence. Test approvals used the Desktop RPC API, not GUI clicks. No real provider credits, user credentials or global settings were used/changed; the owned server/fixture were stopped. Temporary evidence: `/private/tmp/orchestration-tools.TBUIq5/evidence.json`. This is host/API acceptance with synthetic responses, not a fresh real-model or native GUI handoff acceptance pass.
+
+After restarting OpenCode, repeat the bounded task prompt in a project chat with Orchestrator selected. It must create **Pending approval**, not merely describe a plan. Cancel one request and confirm no run, prepare another and review before **Run task**, then inspect **View result**. Real-provider execution can use quota and remains subject to provider/model availability. The historical native attempt below is superseded only for the interactions explicitly confirmed above; chat-switch/reconnect and post-fix GUI task acceptance remain manual checks.
+
+#### Historical isolated native attempt
+
+Automated checkpoint (2026-10-29): **114 tests / 814 assertions**, formatting, strict types and server/TUI/GUI builds pass. Coverage includes frozen requests, no model-accessible approval/start, current-chat/server isolation, stale replies, duplicate clicks, dismissal, reconnect reconciliation and GUI packaging. These are automated contract/controller/packaging checks, not a claim of installed Desktop interaction.
+
+The isolated native attempt started a localhost model fixture on port 43991, an isolated service on 43992, and the Desktop executable with `OPENCODE_DESKTOP_TEST_ROOT`. The main-process log identified **OpenCode Desktop 2.2.0** and a visible main window/test-root CLI. However, the first Computer Use `getApp("OpenCode")` call hung and was aborted after about **1,019.6 seconds**, returning no inspectable GUI state or screenshot; no plugin control click or approval was observed. A visible main window does **not** establish plugin loading or a working native interaction. No native plugin loading/visual/approval acceptance pass is claimed; the older handoff acceptance later in this README does not prove the new Desktop flow.
+
+The owned app, fixture and service were stopped, with no remaining listeners on 43991/43992. No global plugin configuration or provider keys were changed and no update/install command was issued. Launching OpenCode nevertheless triggered its own auto-updater to stage/copy an already-downloaded update in user Library caches/ShipIt. Those caches were left untouched; the bundled CLI still reported 2.2.0. The attempt therefore must not be described as having zero global cache side effects.
+
+Still check in the installed Desktop app after manual setup: open **Orchestration** in a project chat; search/review/apply a model preference without switching the chat model; ask Orchestrator to prepare a bounded task; inspect the full scrollable review and visible actions; cancel one unapproved request with no child starting; approve a separate task only when ready for potential API spending; then inspect this chat's result. Also verify switching chat/server disables the old review and that Refresh reconciles state after reconnect. Keep the app open through the test because run ownership is not persistent. Native acceptance remains pending until these actual interactions are observed.
 
 ## Select models and preview routing
 
@@ -58,7 +126,7 @@ The inventory is paginated to fit terminal dialogs. Follow the next-page instruc
 
 The final reset clears all model selections for the current project. Saved selections survive plugin reloads, are versioned and keyed by project directory, and are revalidated against the currently enabled OpenCode inventory. Invalid settings require an explicit reset; startup never replaces saved selections. OpenCode's `opencode/*-free` models are listed but rejected for our custom agents.
 
-The terminal commands call the server's `ai-orchestration.routing` RPC methods and display responses directly. The desktop browser workspace is not implemented yet; these slash controls are terminal features. The exported `./rpc` contract is reusable by future interfaces.
+The terminal commands call the server's `ai-orchestration.routing` RPC methods and display responses directly. These particular slash controls remain terminal features; native Desktop chat uses the Orchestration controls above and the separate `ai-orchestration.desktop` contract defined in `src/desktop-rpc.ts`. A full browser/agent workspace is not implemented. The exported `./rpc` retains the terminal/server routing contract.
 
 Routing maps easy/medium/hard to small/mid/big, unless you provide a model override. `auto` uses conservative local keyword/scope rules, not an AI confidence score; ambiguous tasks default to medium. Confirmed inventory capabilities (text, tools and image input/output) are checked before approval. The orchestrator selection is reserved for the future workflow planner; single-task runs do not call it. Costs remain unknown.
 
@@ -146,7 +214,7 @@ Safety/limits: unknown JSON fields are rejected; no custom permission/settings f
 
 Developer checks: `bun run check` covers the complete suite. `bun test test/handoffs.test.ts test/execution-integration.test.ts test/rpc-errors.test.ts` focuses on handoff validation, immutable context, report/provenance retrieval, read-tool restrictions, actual adapter-shaped delivery, RPC errors, cancellation and approval. These deterministic fixtures do not prove a fresh real-provider response or interactive dialog layout; perform the preview/cancel/run/status/result sequence above when ready to approve a provider request.
 
-Final branch acceptance (2026-10-28): **89 tests / 655 assertions**, types, formatting, build, working-tree and staged Git whitespace checks passed. An isolated real OpenCode **2.2.0** host using a synthetic localhost HTTP model fixture completed handoff run `339e189d-d43c-4818-8d15-06f7a0021f33`. Its actual result RPC returned `completed`, `HANDOFF_CHECK_OK` and `evidenceVerified:false`; reading it again made no extra generation request. A fixture-driven Orchestrator tool call produced a real pending native `orchestration_result` permission for that exact run ID. Rejection withheld the report; a separate one-time approval returned it, and an Explorer call was blocked. All seven model requests went to the local fixture, not a paid provider. Native permission replies were tested through the API, not by clicking the interactive TUI prompt. The owned server and fixture were stopped; no user credentials/global settings were used or changed and no app upgrade was performed. Evidence remains under `/private/tmp/handoff-final.tVS373/` (`evidence.json`, redacted `server-output.txt`). This verifies host/plugin transport and permission enforcement, not a fresh real-provider answer, an independent verifier, or the full future workflow.
+Historical context-handoffs branch acceptance (2026-10-28): **89 tests / 655 assertions**, types, formatting, build, working-tree and staged Git whitespace checks passed. An isolated real OpenCode **2.2.0** host using a synthetic localhost HTTP model fixture completed handoff run `339e189d-d43c-4818-8d15-06f7a0021f33`. Its actual result RPC returned `completed`, `HANDOFF_CHECK_OK` and `evidenceVerified:false`; reading it again made no extra generation request. A fixture-driven Orchestrator tool call produced a real pending native `orchestration_result` permission for that exact run ID. Rejection withheld the report; a separate one-time approval returned it, and an Explorer call was blocked. All seven model requests went to the local fixture, not a paid provider. Native permission replies were tested through the API, not by clicking the interactive TUI prompt. The owned server and fixture were stopped; no user credentials/global settings were used or changed and no app upgrade was performed. Evidence remains under `/private/tmp/handoff-final.tVS373/` (`evidence.json`, redacted `server-output.txt`). This verifies host/plugin transport and permission enforcement, not a fresh real-provider answer, an independent verifier, or the full future workflow.
 
 Historical loading check (2026-10-22): all **78 tests (349 assertions)**, formatting, types, build and Git whitespace checks passed. Independently, the installed OpenCode CLI **2.1.2** loaded the plugin (including its awaited tool transform) in an isolated localhost server under `/private/tmp/handoff-runtime-NHDBdk`. Actual handoff RPC requests rejected an invalid payload with the handoff validation error and returned the actionable missing-small-tier error for a valid preview; an unknown result lookup returned Unknown task run. The session list remained empty before and after. No provider credentials or generation were used, and the server was stopped. That check covered loading/local validation only; the later final acceptance above covers result retrieval and native permission enforcement. Neither check establishes a new real-provider handoff response or compatibility with every OpenCode release.
 
@@ -220,7 +288,7 @@ Supported modes:
 - `guided`: the orchestrator proposes important choices for user review;
 - `manual`: the user chooses assignments and execution order.
 
-Phase 1 parses these options and records a non-secret diagnostic snapshot in OpenCode's plugin-scoped storage. Model-tier selections are stored separately by project. Workflows, session progress and user memory are not persisted yet. Mode-specific execution arrives with the orchestration engine.
+These options are parsed and recorded in a non-secret diagnostic snapshot in OpenCode's plugin-scoped storage. Model-tier selections are stored separately by project. Workflows, session progress and user memory are not persisted yet. Full mode-specific execution remains future orchestration-engine work.
 
 ## Project structure
 
@@ -231,7 +299,12 @@ scripts/            safe preset installer
 server.ts            local server-plugin entry
 src/index.ts        server plugin entry
 src/tui.ts          terminal plugin entry
+src/gui.tsx         native Desktop controls
+src/gui-controller.ts  scoped GUI request/approval coordination
+src/desktop-*.ts    Desktop RPC, tickets and chat tools
 src/shared/         shared contracts and option parsing
+dist/gui-experimental.cjs  prebuilt native GUI entry
+vite.config.ts      official GUI CommonJS build preset
 test/               Bun tests
 tui.ts               local terminal-plugin entry
 ```
@@ -241,7 +314,9 @@ tui.ts               local terminal-plugin entry
 - `bun run format` formats the repository.
 - `bun run typecheck` performs strict TypeScript checks.
 - `bun test` runs the unit tests.
-- `bun run build` validates both plugin entry points with Bun.
+- `bun run build:server` builds the server and TUI entries with Bun.
+- `bun run build:gui` builds the native GUI-experimental CommonJS bundle with Vite.
+- `bun run build` builds all three plugin parts.
 - `bun run check` runs every validation step.
 
 ## Security and publishing
@@ -255,6 +330,7 @@ tui.ts               local terminal-plugin entry
 
 - [Plugin overview](https://opencode.ai/v2/docs/build/plugins) — `Plugin.define`, stable plugin IDs, lifecycle, options, package loading, and storage.
 - [CLI plugin guide](https://opencode.ai/v2/docs/build/plugins/cli/) — `@opencode/plugin/tui`, terminal setup, notifications, and the `./tui` package export.
+- [GUI plugin guide](https://opencode.ai/v2/docs/build/plugins/gui) — native Desktop parts, global loading, host components and the prebuilt CommonJS bundle.
 - [Agents](https://opencode.ai/v2/docs/agents) — plural `agents`, Markdown profiles, modes, permissions, steps, colors, and `provider/model` IDs.
 
 This code targets V2 only. It intentionally does not import the legacy `@opencode-ai/plugin` package or use legacy singular configuration keys.

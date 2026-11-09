@@ -43,6 +43,15 @@ export function scopeError(): Error {
   )
 }
 
+/** Only the most recently started read may update UI, including its errors/loading state. */
+export function createLatestRead() {
+  let sequence = 0
+  return () => {
+    const request = ++sequence
+    return () => request === sequence
+  }
+}
+
 /** Captured identity guards every response as well as every outbound action. */
 export function createDesktopActions(current: () => DesktopScope | undefined, call: DesktopCall) {
   async function request<T>(
@@ -57,7 +66,7 @@ export function createDesktopActions(current: () => DesktopScope | undefined, ca
       await call(method, { ...input, sessionID: captured.sessionID }, captured),
     )
     if (!inactive && !sameScope(current(), captured)) throw scopeError()
-    if (!value || typeof value !== "object")
+    if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error("Invalid desktop response. Refresh this chat’s controls.")
     return value as T
   }
@@ -116,7 +125,11 @@ export function createDesktopActions(current: () => DesktopScope | undefined, ca
     // through its captured server; it cannot start, cancel or mutate running work.
     discard: (scope: DesktopScope, ticketID: string) =>
       request<DesktopActionResult>(scope, "discard", { ticketID }, true),
-    run: (scope: DesktopScope, runID: string) => request<DesktopRun>(scope, "run", { runID }),
+    async run(scope: DesktopScope, runID: string) {
+      const value = await request<DesktopRun>(scope, "run", { runID })
+      if (value.id !== runID) throw new Error("The result does not match the requested run.")
+      return value
+    },
   }
 }
 

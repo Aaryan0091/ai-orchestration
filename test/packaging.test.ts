@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 
 import { Host } from "@opencode/plugin/host"
 
@@ -16,8 +17,8 @@ describe("package entrypoints", () => {
   test("OpenCode Host.resolve finds the local server and TUI entries", () => {
     const entrypoints = Host.resolve({ directory: projectRoot })
 
-    expect(entrypoints.server).toEndWith("/server.ts")
-    expect(entrypoints.tui).toEndWith("/tui.ts")
+    expect(entrypoints.server).toBe(pathToFileURL(join(projectRoot, "src/index.ts")).href)
+    expect(entrypoints.tui).toBe(pathToFileURL(join(projectRoot, "src/tui.ts")).href)
   })
 
   test("OpenCode Host.load imports local and package-resolved entrypoints", async () => {
