@@ -8,6 +8,9 @@ import { registerHandoffResultTool } from "./handoff-tool.ts"
 import { createDesktopControls, desktopReply } from "./desktop-controls.ts"
 import { desktopRpc } from "./desktop-rpc.ts"
 import { registerDesktopTools } from "./desktop-tools.ts"
+import { createWorkflowDrafts } from "./workflow-drafts.ts"
+import { workflowRpc } from "./workflow-rpc.ts"
+import { registerWorkflowTool } from "./workflow-tool.ts"
 
 import { AGENT_IDS, parseOptions, type PluginSnapshot } from "./shared/types.ts"
 
@@ -62,15 +65,17 @@ export default Plugin.define({
       write: (value) => context.storage.set(policyKey, JSON.parse(JSON.stringify(value))),
     })
     type SessionID = Parameters<Plugin.Context["session"]["get"]>[0]["sessionID"]
-    let desktopRegistration:
-      | {
-          dispose(): Promise<void>
-          events: { emit(name: "changed", data: { sessionID: string }): Promise<void> }
-        }
-      | undefined
+    type ScopedRegistration = {
+      dispose(): Promise<void>
+      events: { emit(name: "changed", data: { sessionID: string }): Promise<void> }
+    }
+    const session = (sessionID: string) =>
+      context.session.get({ sessionID: sessionID as SessionID })
+    let desktopRegistration: ScopedRegistration | undefined
+    let workflowRegistration: ScopedRegistration | undefined
     const desktop = createDesktopControls({
       directory: context.location.directory,
-      session: (sessionID) => context.session.get({ sessionID: sessionID as SessionID }),
+      session,
       routing: commands,
       execution,
       engine,
@@ -80,14 +85,26 @@ export default Plugin.define({
         await desktopRegistration?.events.emit("changed", { sessionID })
       },
     })
+    const workflow = createWorkflowDrafts({
+      directory: context.location.directory,
+      session,
+      createResolver: engine.createWorkflowRoutingResolver,
+      changed: async (sessionID) => {
+        await workflowRegistration?.events.emit("changed", { sessionID })
+      },
+    })
     let toolRegistration: Awaited<ReturnType<typeof registerHandoffResultTool>> | undefined
     let desktopTools: Awaited<ReturnType<typeof registerDesktopTools>> | undefined
+    let workflowTool: Awaited<ReturnType<typeof registerWorkflowTool>> | undefined
     let routingRegistration: { dispose(): Promise<void> } | undefined
     async function dispose() {
       let failure: unknown
+      workflow.dispose()
       for (const registration of [
         routingRegistration,
+        workflowRegistration,
         desktopRegistration,
+        workflowTool,
         desktopTools,
         toolRegistration,
       ]) {
@@ -112,6 +129,7 @@ export default Plugin.define({
     try {
       toolRegistration = await registerHandoffResultTool(context, engine.handoffResult)
       desktopTools = await registerDesktopTools(context, desktop)
+      workflowTool = await registerWorkflowTool(context, workflow)
       desktopRegistration = await context.rpc.register(desktopRpc, {
         state: (input, call) => desktopReply(() => desktop.state(input, call.signal)),
         review: (input, call) => desktopReply(() => desktop.review(input, call.signal)),
@@ -122,6 +140,10 @@ export default Plugin.define({
         proposeCancel: (input, call) =>
           desktopReply(() => desktop.proposeCancel(input, call.signal)),
         run: (input, call) => desktopReply(() => desktop.run(input, call.signal)),
+      })
+      workflowRegistration = await context.rpc.register(workflowRpc, {
+        state: (input, call) => desktopReply(() => workflow.state(input, call.signal)),
+        discard: (input, call) => desktopReply(() => workflow.discard(input, call.signal)),
       })
       const registration = await context.rpc.register(routingRpc, {
         models: async (input, call) =>

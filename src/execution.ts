@@ -1,5 +1,6 @@
 import {
   difficultyTier,
+  formatSelection,
   validateSelection,
   type Difficulty,
   type ModelCandidate,
@@ -13,6 +14,7 @@ import {
   type HandoffPackage,
   type SpecialistReport,
 } from "./handoffs.ts"
+import { AGENT_IDS, type AgentId } from "./shared/types.ts"
 
 export type Capability = "text" | "tools" | "imageInput" | "imageOutput" | "reasoning"
 export class StopUnconfirmedError extends Error {
@@ -21,14 +23,10 @@ export class StopUnconfirmedError extends Error {
     this.name = "StopUnconfirmedError"
   }
 }
-export type AgentRole =
-  | "explorer"
-  | "planner"
-  | "builder"
-  | "debugger"
-  | "reviewer"
-  | "verifier"
-  | "visualizer"
+export type AgentRole = Exclude<AgentId, "orchestrator">
+export const SPECIALIST_ROLES: readonly AgentRole[] = AGENT_IDS.filter(
+  (agent): agent is AgentRole => agent !== "orchestrator",
+)
 export interface ExecutionModel extends ModelCandidate {
   capabilities: readonly Capability[]
 }
@@ -63,6 +61,12 @@ export interface ExecutionPlan {
   options: ExecutionOptions
   createdAt: number
   handoff?: HandoffPackage
+}
+export interface WorkflowRoutingPreview {
+  difficulty: Difficulty
+  tier: ExecutionPlan["tier"]
+  model?: string
+  blocker?: string
 }
 export interface ExecutionOutcome {
   ok: boolean
@@ -137,15 +141,6 @@ export function assessTask(task: string): Assessment {
   }
 }
 
-const roles: readonly AgentRole[] = [
-  "explorer",
-  "planner",
-  "builder",
-  "debugger",
-  "reviewer",
-  "verifier",
-  "visualizer",
-]
 const capabilities: readonly Capability[] = [
   "text",
   "tools",
@@ -154,6 +149,37 @@ const capabilities: readonly Capability[] = [
   "reasoning",
 ]
 const clone = <T>(value: T): T => structuredClone(value)
+const unsupportedImageTask = /\b(generate|create|draw|paint)\b.{0,35}\b(image|photo|picture)\b/i
+
+function assessExecutionRequest(request: ExecutionRequest) {
+  if (!request.task?.trim() || request.task.length > 20000)
+    throw new Error("Supply a task between 1 and 20000 characters.")
+  const agent = request.agent ?? "explorer"
+  if (!SPECIALIST_ROLES.includes(agent)) throw new Error("Unknown specialist agent.")
+  const inferred = assessTask(request.task)
+  const override = request.difficulty === "auto" ? undefined : request.difficulty
+  const difficulty = override ?? inferred.difficulty
+  const required = [
+    ...new Set([
+      ...inferred.capabilities,
+      ...(request.requiredCapabilities ?? []),
+      ...(["builder", "debugger", "verifier", "reviewer", "explorer"].includes(agent)
+        ? ["tools" as const]
+        : []),
+    ]),
+  ]
+  if (required.some((item) => !capabilities.includes(item)))
+    throw new Error("Unknown required capability.")
+  return {
+    agent,
+    assessment: {
+      difficulty,
+      reason: override ? "Explicit user difficulty override." : inferred.reason,
+      capabilities: required,
+    },
+    tier: difficultyTier(difficulty),
+  }
+}
 
 export function createExecutionEngine(host: ExecutionHost) {
   const plans = new Map<string, ExecutionPlan>()
@@ -191,6 +217,7 @@ export function createExecutionEngine(host: ExecutionHost) {
     model: Selection,
     inventory: readonly ExecutionModel[],
     required: readonly Capability[],
+    capabilityGuidance = "Choose an override.",
   ) {
     validateSelection(model, inventory)
     const entry = inventory.find(
@@ -199,8 +226,50 @@ export function createExecutionEngine(host: ExecutionHost) {
     const missing = required.filter((capability) => !entry?.capabilities.includes(capability))
     if (missing.length)
       throw new Error(
-        `Model does not have confirmed capabilities: ${missing.join(", ")}. Choose an override.`,
+        `Model does not have confirmed capabilities: ${missing.join(", ")}. ${capabilityGuidance}`,
       )
+  }
+
+  /** One snapshot per workflow. Reads saved tiers and the catalog, never the runnable plans map. */
+  function createWorkflowRoutingResolver() {
+    async function safeRead<T>(read: () => Promise<T>): Promise<T | undefined> {
+      try {
+        return clone(await read())
+      } catch {
+        // Do not surface arbitrary storage/catalog failures (potential credential data).
+        return undefined
+      }
+    }
+    let config: Promise<RoutingConfig | undefined> | undefined
+    let inventory: Promise<readonly ExecutionModel[] | undefined> | undefined
+    return async (request: ExecutionRequest): Promise<WorkflowRoutingPreview> => {
+      const { assessment, tier } = assessExecutionRequest(request)
+      const route = { difficulty: assessment.difficulty, tier }
+      if (unsupportedImageTask.test(request.task))
+        return { ...route, blocker: "Image generation is not supported by this text-task runner." }
+      const saved = await (config ??= safeRead(() => host.readConfig()))
+      if (!saved) return { ...route, blocker: "Could not read saved project model tiers." }
+      const primary = saved.selections[tier]
+      if (!primary) return { ...route, blocker: `Select a ${tier} model first.` }
+      const proposed = { ...route, model: formatSelection(primary) }
+      const available = await (inventory ??= safeRead(() => host.listModels()))
+      if (!available) return { ...proposed, blocker: "Could not read connected models." }
+      try {
+        validate(
+          primary,
+          available,
+          assessment.capabilities,
+          `Choose a compatible model for the saved ${tier} tier, then prepare a new draft.`,
+        )
+      } catch (error) {
+        // Only local validation runs here; it does not make requests to any provider.
+        return {
+          ...proposed,
+          blocker: error instanceof Error ? error.message : "The saved model is unsuitable.",
+        }
+      }
+      return proposed
+    }
   }
 
   async function preview(request: ExecutionRequest): Promise<ExecutionPlan> {
@@ -208,29 +277,12 @@ export function createExecutionEngine(host: ExecutionHost) {
     const handoff = request.handoff === undefined ? undefined : validateHandoff(request.handoff)
     if (handoff && request.task !== handoff.objective)
       throw new Error("Handoff objective must match the task.")
-    if (/\b(generate|create|draw|paint)\b.{0,35}\b(image|photo|picture)\b/i.test(request.task))
+    if (unsupportedImageTask.test(request.task))
       throw new Error(
         "Image generation is not supported by this text-task runner. Use OpenCode's image tools directly.",
       )
-    if (!request.task?.trim() || request.task.length > 20000)
-      throw new Error("Supply a task between 1 and 20000 characters.")
-    const agent = request.agent ?? "explorer"
-    if (!roles.includes(agent)) throw new Error("Unknown specialist agent.")
-    const inferred = assessTask(request.task)
-    const difficulty =
-      request.difficulty && request.difficulty !== "auto" ? request.difficulty : inferred.difficulty
-    const tier = difficultyTier(difficulty)
-    const required = [
-      ...new Set([
-        ...inferred.capabilities,
-        ...(request.requiredCapabilities ?? []),
-        ...(["builder", "debugger", "verifier", "reviewer", "explorer"].includes(agent)
-          ? ["tools" as const]
-          : []),
-      ]),
-    ]
-    if (required.some((item) => !capabilities.includes(item)))
-      throw new Error("Unknown required capability.")
+    const { agent, assessment, tier } = assessExecutionRequest(request)
+    const { difficulty, capabilities: required } = assessment
     const options = clone(request.options ?? {})
     const maxRetries = options.maxRetries ?? 0
     if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > 3)
@@ -292,14 +344,7 @@ export function createExecutionEngine(host: ExecutionHost) {
       id: id(),
       task: request.task.trim(),
       agent,
-      assessment: {
-        difficulty,
-        reason:
-          request.difficulty && request.difficulty !== "auto"
-            ? "Explicit user difficulty override."
-            : inferred.reason,
-        capabilities: required,
-      },
+      assessment,
       tier,
       models: unique,
       options,
@@ -443,6 +488,10 @@ export function createExecutionEngine(host: ExecutionHost) {
 
   return {
     preview,
+    previewRouting(request: ExecutionRequest) {
+      return createWorkflowRoutingResolver()(request)
+    },
+    createWorkflowRoutingResolver,
     start,
     status,
     cancel,

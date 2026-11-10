@@ -108,8 +108,8 @@ test("all server RPC handlers return portable application failures, not opaque e
   }
 })
 
-test("server releases result tool and retry guard on registration failure or cleanup failure", async () => {
-  for (const failRegistration of [true, false]) {
+test("server releases each registration and retry guard on registration failure or cleanup failure", async () => {
+  for (const failRegistration of ["ai-orchestration.desktop", "ai-orchestration.workflow", null]) {
     const disposed: string[] = []
     let toolCount = 0
     const context = {
@@ -125,7 +125,7 @@ test("server releases result tool and retry guard on registration failure or cle
       },
       tool: {
         transform: async () => {
-          const name = toolCount++ === 0 ? "result-tool" : "desktop-tools"
+          const name = ["result-tool", "desktop-tools", "workflow-tool"][toolCount++]!
           return {
             dispose: async () => {
               disposed.push(name)
@@ -135,11 +135,11 @@ test("server releases result tool and retry guard on registration failure or cle
       },
       rpc: {
         register: async (definition: { id: string }) => {
-          if (failRegistration) throw new Error("registration failed")
+          if (failRegistration === definition.id) throw new Error("registration failed")
           return {
             dispose: async () => {
-              disposed.push(definition.id === "ai-orchestration.desktop" ? "desktop-rpc" : "rpc")
-              throw new Error("cleanup failed")
+              disposed.push(definition.id)
+              if (!failRegistration) throw new Error("cleanup failed")
             },
           }
         },
@@ -150,11 +150,14 @@ test("server releases result tool and retry guard on registration failure or cle
       const cleanup = await server.setup(context)
       await expect(cleanup?.()).rejects.toThrow("cleanup failed")
     }
-    expect(disposed).toEqual(
-      failRegistration
-        ? ["desktop-tools", "result-tool", "retry"]
-        : ["rpc", "desktop-rpc", "desktop-tools", "result-tool", "retry"],
-    )
+    expect(disposed).toEqual([
+      ...(!failRegistration ? ["ai-orchestration.routing", "ai-orchestration.workflow"] : []),
+      ...(failRegistration !== "ai-orchestration.desktop" ? ["ai-orchestration.desktop"] : []),
+      "workflow-tool",
+      "desktop-tools",
+      "result-tool",
+      "retry",
+    ])
   }
 })
 
