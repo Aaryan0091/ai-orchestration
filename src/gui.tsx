@@ -23,6 +23,7 @@ import {
   sameScope,
   type DesktopScope,
 } from "./gui-controller.ts"
+import { WorkflowDrafts, workflowStyles } from "./gui-workflows.tsx"
 import { unwrapRoutingReply } from "./rpc.ts"
 
 const TAB = { id: "controls", title: "Orchestration", icon: "task" as const }
@@ -62,6 +63,7 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
   const [query, setQuery] = createSignal("")
   const [slot, setSlot] = createSignal<(typeof slots)[number]>("small")
   const [selection, setSelection] = createSignal("")
+  const [workflowRefresh, setWorkflowRefresh] = createSignal(0)
   let generation = 0
   let disposed = false
   const stateRead = createLatestRead()
@@ -324,7 +326,10 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
         <ctx.ui.Button
           variant="ghost"
           busy={loading()}
-          onClick={() => void refresh(current(), true)}
+          onClick={() => {
+            setWorkflowRefresh((version) => version + 1)
+            void refresh(current(), true)
+          }}
         >
           Refresh
         </ctx.ui.Button>
@@ -343,6 +348,12 @@ function Controls(props: { ctx: Context; session: SessionRef }) {
         </p>
       </Show>
       <Show when={current()}>
+        <WorkflowDrafts
+          ctx={ctx}
+          session={props.session}
+          current={current}
+          refreshVersion={workflowRefresh()}
+        />
         <section aria-labelledby="oc-pending">
           <h3 id="oc-pending">Pending approval</h3>
           <Show when={loading() && !state()}>
@@ -550,6 +561,7 @@ export default Plugin.define({
       Style,
       `.oc-orchestration{height:100%;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:24px;font-size:13px;line-height:1.5;color:inherit}.oc-orchestration h2,.oc-orchestration h3,.oc-orchestration h4{font-weight:600;margin:0 0 8px}.oc-orchestration h2{font-size:18px}.oc-orchestration-heading,.oc-orchestration-row{display:flex;align-items:start;justify-content:space-between;gap:12px}.oc-orchestration-muted{opacity:.75;margin:4px 0 10px;overflow-wrap:anywhere}.oc-orchestration-row,.oc-orchestration-run{padding:12px 0;border-bottom:1px solid color-mix(in srgb,currentColor 15%,transparent)}.oc-orchestration-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:10px 0}.oc-orchestration-field{display:flex;flex-direction:column;gap:6px;margin:12px 0}.oc-orchestration-field select{padding:8px;border:1px solid color-mix(in srgb,currentColor 30%,transparent);border-radius:6px;background:transparent;color:inherit}.oc-orchestration-models{display:grid;gap:8px}.oc-orchestration-models>div{display:grid;grid-template-columns:100px minmax(0,1fr);gap:12px}.oc-orchestration-models dd{margin:0;overflow-wrap:anywhere}.oc-orchestration-models dt{font-weight:600}.oc-orchestration-inventory{list-style:none;padding:0;margin:12px 0;display:grid;gap:8px}.oc-orchestration-inventory li{overflow-wrap:anywhere}.oc-orchestration-inventory button,.oc-orchestration-variants button{cursor:pointer;text-align:left;text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}.oc-orchestration-inventory button:disabled{cursor:not-allowed;opacity:.5}.oc-orchestration-inventory span{display:block;opacity:.65}.oc-orchestration-variants{display:flex;gap:10px;flex-wrap:wrap;font-size:12px}.oc-orchestration-error{padding:10px;border:1px solid currentColor;border-radius:6px;overflow-wrap:anywhere}.oc-orchestration-notice{padding:10px;border-left:3px solid #a8f5e9;white-space:pre-wrap;overflow-wrap:anywhere}.oc-orchestration-preview{font-family:inherit;font-size:13px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0}.oc-orchestration-review{min-height:0;max-width:100%}.oc-orchestration :focus-visible{outline:2px solid currentColor;outline-offset:3px}.oc-orchestration-search{display:flex;align-items:end;gap:8px}.oc-orchestration-search>label{flex:1;min-width:0}`,
     )
+    ctx.add(Style, workflowStyles)
     ctx.add(Panel, {
       id: "controls",
       region: "side",
@@ -570,7 +582,7 @@ export default Plugin.define({
     ctx.add(Command, () => ({
       id: "controls",
       title: "Open Orchestration controls",
-      description: "Model preferences, pending approvals and task results",
+      description: "Workflow drafts, model preferences, pending approvals and task results",
       group: "Orchestration",
       section: "session" as const,
       slash: { name: "orchestration" },

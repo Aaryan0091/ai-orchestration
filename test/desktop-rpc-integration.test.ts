@@ -28,6 +28,7 @@ async function setup() {
   const tools = new Map<string, Tool>()
   const handlers = new Map<string, Record<string, Handler>>()
   const saved = new Map<string, unknown>()
+  const storageWrites: string[] = []
   const calls: { action: string; input?: unknown }[] = []
   const changed: { name: string; data: unknown }[] = []
   const disposed: string[] = []
@@ -52,9 +53,11 @@ async function setup() {
     storage: {
       get: async (key: string) => saved.get(key),
       set: async (key: string, value: unknown) => {
+        storageWrites.push(key)
         saved.set(key, wire(value))
       },
       remove: async (key: string) => {
+        storageWrites.push(key)
         saved.delete(key)
       },
     },
@@ -148,6 +151,7 @@ async function setup() {
     calls,
     changed,
     saved,
+    storageWrites,
     disposed,
     cleanup,
     call,
@@ -181,6 +185,7 @@ test("agent-facing orchestration tools stay on the native tool list instead of C
         "orchestration_desktop_status",
         "orchestration_project_models",
         "orchestration_handoff_result",
+        "orchestration_prepare_workflow",
       ].sort(),
     )
     expect(f.tools.get("orchestration_handoff_result")?.options?.permission).toBe(
@@ -256,8 +261,124 @@ test("server contract wiring: chat proposes, trusted desktop approval saves mode
     await f.cleanup?.()
   }
   expect(f.disposed).toContain("ai-orchestration.desktop")
+  expect(f.disposed).toContain("ai-orchestration.workflow")
   expect(f.disposed).toContain("ai-orchestration.routing")
   expect(f.disposed).toContain("retry")
+})
+
+test("workflow proposals are routed drafts, scoped to the originating chat, and cannot run", async () => {
+  const f = await setup()
+  const workflow = "ai-orchestration.workflow"
+  const origin = { sessionID: "origin" }
+  const other = { sessionID: "other" }
+  const request = {
+    title: "Inspect and implement a change",
+    steps: [
+      {
+        id: "implement",
+        task: "Implement the proposed change",
+        agent: "builder",
+        difficulty: "medium",
+        dependsOn: ["inspect"],
+      },
+      {
+        id: "inspect",
+        task: "Inspect the project",
+        agent: "explorer",
+        difficulty: "easy",
+        dependsOn: [],
+      },
+    ],
+  }
+  try {
+    const model = await f.rpc("proposeModel", {
+      ...origin,
+      slot: "small",
+      selection: "fixture/small",
+    })
+    await f.rpc("approve", { ...origin, ticketID: model.id })
+    const writes = [...f.storageWrites]
+    const changes = f.changed.length
+    const draft = await f.tool("orchestration_prepare_workflow", request)
+    expect(draft.id as string).toMatch(/^workflow-/)
+    expect(draft).toMatchObject({
+      sessionID: "origin",
+      directory: "/integration-desktop",
+      title: request.title,
+      steps: [
+        { id: "inspect", difficulty: "easy", tier: "small", model: "fixture/small", dependsOn: [] },
+        {
+          id: "implement",
+          difficulty: "medium",
+          tier: "mid",
+          blocker: "Select a mid model first.",
+          dependsOn: ["inspect"],
+        },
+      ],
+    })
+    expect((draft.steps as Record<string, unknown>[])[1]).not.toHaveProperty("model")
+    expect(await f.rpc("state", origin, workflow)).toMatchObject({ drafts: [draft] })
+    expect(await f.rpc("state", other, workflow)).toMatchObject({ drafts: [] })
+    expect(await f.rpc("state", { sessionID: "wrong-project" }, workflow)).toMatchObject({
+      ok: false,
+    })
+    expect(await f.rpc("state", origin)).toMatchObject({ pending: [], runs: [] })
+    expect(await f.rpc("discard", { ...other, draftID: draft.id }, workflow)).toMatchObject({
+      ok: false,
+    })
+    expect(await f.rpc("approve", { ...origin, ticketID: draft.id })).toMatchObject({ ok: false })
+    expect(await f.rpc("start", draft.id, "ai-orchestration.routing")).toMatchObject({ ok: false })
+    expect(f.calls).toEqual([])
+    expect(f.storageWrites).toEqual(writes)
+
+    const revision = await f.tool("orchestration_prepare_workflow", {
+      ...request,
+      title: "Revised workflow",
+    })
+    expect(revision.id).not.toBe(draft.id)
+    expect(await f.rpc("state", origin, workflow)).toMatchObject({ drafts: [revision, draft] })
+    expect(await f.rpc("discard", { ...origin, draftID: draft.id }, workflow)).toEqual({
+      id: draft.id,
+    })
+    expect(await f.rpc("state", origin, workflow)).toMatchObject({ drafts: [revision] })
+    expect(f.changed.slice(changes)).toEqual(
+      Array.from({ length: 3 }, () => ({ name: "changed", data: { sessionID: "origin" } })),
+    )
+    expect(f.calls).toEqual([])
+    expect(f.storageWrites).toEqual(writes)
+  } finally {
+    await f.cleanup?.()
+  }
+})
+
+test("workflow native tool rejects malformed inputs, other roles, and aborted calls", async () => {
+  const f = await setup()
+  const name = "orchestration_prepare_workflow"
+  const step = { id: "inspect", task: "Inspect the project", agent: "explorer", dependsOn: [] }
+  const request = { title: "Inspect project", steps: [step] }
+  try {
+    for (const input of [
+      { ...request, sessionID: "other" },
+      { ...request, steps: [{ ...step, model: "fixture/small" }] },
+      { ...request, steps: [{ ...step, dependsOn: ["unknown"] }] },
+      { ...request, steps: [] },
+    ])
+      expect(await f.tool(name, input)).toMatchObject({ ok: false })
+    for (const actor of [
+      { ...f.call, agent: "explorer" },
+      { ...f.call, sessionID: "wrong-project" },
+      { ...f.call, signal: AbortSignal.abort() },
+    ])
+      expect(await f.tool(name, request, actor as Call)).toMatchObject({ ok: false })
+    expect(
+      await f.rpc("state", { sessionID: "origin" }, "ai-orchestration.workflow"),
+    ).toMatchObject({ drafts: [] })
+    expect(f.changed).toEqual([])
+    expect(f.calls).toEqual([])
+    expect(f.storageWrites).toEqual(["foundation"])
+  } finally {
+    await f.cleanup?.()
+  }
 })
 
 test("desktop RPC and tool trust boundaries reject replacement identity, cross-chat use and malformed payloads", async () => {

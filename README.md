@@ -73,13 +73,25 @@ Prepare an easy Explorer task that returns DESKTOP_CHECK_OK using only that supp
 4. The chat tool prepares a bounded request. In **Pending approval**, choose **Review**, read the complete scrollable task/context/models/cost warning, then select **Run task** only if you approve. Cancel or dismiss the review to discard the unapproved ticket. There is no model-callable approve/start tool. Asking the Orchestrator is still a normal model request and can use your provider quota; preparing or viewing a ticket does not itself start a specialist request. Approving a task can spend API credits.
 5. Under **This chat's runs**, use **View result** or **Refresh** to inspect state and the structured report. Completion means the child returned a valid report, not that an independent verifier proved it correct. Evidence remains self-reported. For a running task, **Review cancellation** opens a separate frozen request; **Cancel running task** confirms it. Cancelling a review is not the same as cancelling an already-running task.
 
-The Orchestrator tools are `orchestration_project_models`, `orchestration_prepare_handoff`, `orchestration_prepare_model_change`, `orchestration_prepare_cancel` and `orchestration_desktop_status`. Existing report retrieval remains permission-gated. Normal informational chat need not use a specialist; the plugin does not disable OpenCode's other native capabilities.
+The Orchestrator tools are `orchestration_project_models`, `orchestration_prepare_handoff`, `orchestration_prepare_workflow`, `orchestration_prepare_model_change`, `orchestration_prepare_cancel` and `orchestration_desktop_status`. Existing report retrieval remains permission-gated. Normal informational chat need not use a specialist; the plugin does not disable OpenCode's other native capabilities.
 
 Requests are bounded, expiring, single-use and tied to their origin chat/project. The GUI captures the server/chat identity and rejects stale replies, duplicate actions and approvals after switching context. Remote chats use their selected server, never an implicit local fallback. Reconnect or return to the original chat and refresh to reconcile pending requests. If an approval reply is lost, inspect that chat's runs before preparing another request; the first request may already have been consumed.
 
 Current scope: the panel shows this chat's Desktop-controlled runs, not a full agent workspace or every terminal-created run. Requests/run ownership are in memory and disappear on plugin restart; no automatic replay occurs. Project model preferences persist separately. A successful bundle or mocked component test is not a native Desktop interaction pass; the current verification boundary is recorded below.
 
 Developer checks: `bun run check` runs formatting, types, all tests and the server/TUI/native GUI builds. `bun test test/desktop-rpc-integration.test.ts test/gui-controller.test.ts test/gui-packaging.test.ts` focuses on native-control RPC integration, GUI request/decision logic and bundle packaging; those fixtures alone do not prove actual Desktop loading or visual interaction.
+
+### Preview a multi-step workflow
+
+Ask Orchestrator in the project chat:
+
+```text
+Draft a workflow preview only: Explorer outlines what to inspect, Planner proposes the change, and Verifier drafts checks. Make each step depend on the previous one. Do not inspect files or run anything.
+```
+
+Open **Orchestration → Workflow drafts → Review draft** in that same chat. The draft shows the dependency order, each specialist and objective, and the proposed model from your saved tier. A missing or unsuitable model appears as a blocker. After changing a saved tier, ask for a new draft to refresh the proposed models.
+
+Drafts are preview-only: they never start specialist sessions, create executable approvals, or change model settings. **Close** keeps the draft; **Discard draft** removes it. To revise a plan, ask Orchestrator in the same chat for a new draft and discard the old one if you no longer need it. Drafts support up to 12 steps, are limited to five per chat, expire after 10 minutes, and clear on plugin restart. The normal Orchestrator chat request can still use your model quota.
 
 ### Verification and remaining native check
 
