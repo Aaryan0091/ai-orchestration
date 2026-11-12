@@ -109,7 +109,13 @@ test("all server RPC handlers return portable application failures, not opaque e
 })
 
 test("server releases each registration and retry guard on registration failure or cleanup failure", async () => {
-  for (const failRegistration of ["ai-orchestration.desktop", "ai-orchestration.workflow", null]) {
+  for (const failRegistration of [
+    "ai-orchestration.desktop",
+    "ai-orchestration.workflow",
+    "ai-orchestration.guided",
+    "ai-orchestration.routing",
+    null,
+  ]) {
     const disposed: string[] = []
     let toolCount = 0
     const context = {
@@ -151,7 +157,15 @@ test("server releases each registration and retry guard on registration failure 
       await expect(cleanup?.()).rejects.toThrow("cleanup failed")
     }
     expect(disposed).toEqual([
-      ...(!failRegistration ? ["ai-orchestration.routing", "ai-orchestration.workflow"] : []),
+      ...(!failRegistration ? ["ai-orchestration.routing"] : []),
+      ...(!failRegistration || failRegistration === "ai-orchestration.routing"
+        ? ["ai-orchestration.guided"]
+        : []),
+      ...(!["ai-orchestration.desktop", "ai-orchestration.workflow"].includes(
+        failRegistration ?? "",
+      )
+        ? ["ai-orchestration.workflow"]
+        : []),
       ...(failRegistration !== "ai-orchestration.desktop" ? ["ai-orchestration.desktop"] : []),
       "workflow-tool",
       "desktop-tools",

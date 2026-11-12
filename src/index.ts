@@ -11,6 +11,8 @@ import { registerDesktopTools } from "./desktop-tools.ts"
 import { createWorkflowDrafts } from "./workflow-drafts.ts"
 import { workflowRpc } from "./workflow-rpc.ts"
 import { registerWorkflowTool } from "./workflow-tool.ts"
+import { guidedRpc } from "./guided-rpc.ts"
+import { createGuidedWorkflows } from "./guided-workflows.ts"
 
 import { AGENT_IDS, parseOptions, type PluginSnapshot } from "./shared/types.ts"
 
@@ -73,6 +75,7 @@ export default Plugin.define({
       context.session.get({ sessionID: sessionID as SessionID })
     let desktopRegistration: ScopedRegistration | undefined
     let workflowRegistration: ScopedRegistration | undefined
+    let guidedRegistration: ScopedRegistration | undefined
     const desktop = createDesktopControls({
       directory: context.location.directory,
       session,
@@ -93,6 +96,15 @@ export default Plugin.define({
         await workflowRegistration?.events.emit("changed", { sessionID })
       },
     })
+    const guided = createGuidedWorkflows({
+      directory: context.location.directory,
+      session,
+      draft: (sessionID, draftID, signal) => workflow.get({ sessionID, draftID }, signal),
+      engine,
+      changed: async (sessionID) => {
+        await guidedRegistration?.events.emit("changed", { sessionID })
+      },
+    })
     let toolRegistration: Awaited<ReturnType<typeof registerHandoffResultTool>> | undefined
     let desktopTools: Awaited<ReturnType<typeof registerDesktopTools>> | undefined
     let workflowTool: Awaited<ReturnType<typeof registerWorkflowTool>> | undefined
@@ -100,8 +112,14 @@ export default Plugin.define({
     async function dispose() {
       let failure: unknown
       workflow.dispose()
+      try {
+        await guided.dispose()
+      } catch (error) {
+        failure ??= error
+      }
       for (const registration of [
         routingRegistration,
+        guidedRegistration,
         workflowRegistration,
         desktopRegistration,
         workflowTool,
@@ -144,6 +162,14 @@ export default Plugin.define({
       workflowRegistration = await context.rpc.register(workflowRpc, {
         state: (input, call) => desktopReply(() => workflow.state(input, call.signal)),
         discard: (input, call) => desktopReply(() => workflow.discard(input, call.signal)),
+      })
+      guidedRegistration = await context.rpc.register(guidedRpc, {
+        state: (input, call) => desktopReply(() => guided.state(input, call.signal)),
+        begin: (input, call) => desktopReply(() => guided.begin(input, call.signal)),
+        review: (input, call) => desktopReply(() => guided.review(input, call.signal)),
+        approve: (input, call) => desktopReply(() => guided.approve(input, call.signal)),
+        dismiss: (input, call) => desktopReply(() => guided.dismiss(input, call.signal)),
+        cancel: (input, call) => desktopReply(() => guided.cancel(input, call.signal)),
       })
       const registration = await context.rpc.register(routingRpc, {
         models: async (input, call) =>

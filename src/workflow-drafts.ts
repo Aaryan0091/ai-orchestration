@@ -66,6 +66,14 @@ export function createWorkflowDrafts(host: WorkflowDraftHost) {
     for (const [draftID, draft] of drafts) if (timestamp >= draft.expiresAt) drafts.delete(draftID)
   }
 
+  function ownedDraft(sessionID: string, draftID: string): WorkflowDraft {
+    expire()
+    const draft = drafts.get(draftID)
+    if (!draft || draft.sessionID !== sessionID)
+      throw new DesktopControlError("Workflow draft is not available in this chat.")
+    return draft
+  }
+
   function reserve(sessionID: string) {
     expire()
     const active = [...drafts.values()].filter((draft) => draft.sessionID === sessionID).length
@@ -150,16 +158,23 @@ export function createWorkflowDrafts(host: WorkflowDraftHost) {
       }
     },
 
+    // Internal read for guided setup; this does not grant approval or expose a runnable ID.
+    async get(raw: unknown, signal?: AbortSignal): Promise<WorkflowDraft> {
+      const input = object(raw, ["sessionID", "draftID"])
+      const sessionID = identifier(input.sessionID)
+      const draftID = identifier(input.draftID)
+      await checkSession(sessionID, signal)
+      checkOpen(signal)
+      return structuredClone(ownedDraft(sessionID, draftID))
+    },
+
     async discard(raw: unknown, signal?: AbortSignal): Promise<{ id: string }> {
       const input = object(raw, ["sessionID", "draftID"])
       const sessionID = identifier(input.sessionID)
       const draftID = identifier(input.draftID)
       await checkSession(sessionID, signal)
       checkOpen(signal)
-      expire()
-      const draft = drafts.get(draftID)
-      if (!draft || draft.sessionID !== sessionID)
-        throw new DesktopControlError("Workflow draft is not available in this chat.")
+      ownedDraft(sessionID, draftID)
       drafts.delete(draftID)
       await notify(sessionID)
       return { id: draftID }
