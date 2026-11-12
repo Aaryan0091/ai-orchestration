@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import type { Plugin } from "@opencode/plugin"
 import server from "../src/index.ts"
+import type { GuidedState } from "../src/guided-rpc.ts"
 
 type Editor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0]
 type Tool = Parameters<Editor["add"]>[0]
@@ -24,7 +25,7 @@ function handoff() {
   }
 }
 
-async function setup() {
+async function setup({ guided = false } = {}) {
   const tools = new Map<string, Tool>()
   const handlers = new Map<string, Record<string, Handler>>()
   const saved = new Map<string, unknown>()
@@ -33,18 +34,27 @@ async function setup() {
   const changed: { name: string; data: unknown }[] = []
   const disposed: string[] = []
   let child = 0
+  let modelError: Error | undefined
   const report = {
     version: 1,
     summary: "DESKTOP_CHAT_OK",
     findings: [],
     evidence: ["Supplied marker"],
-    checks: [
-      {
-        check: "Summary contains DESKTOP_CHAT_OK",
-        status: "passed",
-        details: "Exact marker present",
-      },
-    ],
+    checks: guided
+      ? [
+          {
+            check: "The approved step objective was completed.",
+            status: "passed",
+            details: "Fixture completed the marker check",
+          },
+        ]
+      : [
+          {
+            check: "Summary contains DESKTOP_CHAT_OK",
+            status: "passed",
+            details: "Exact marker present",
+          },
+        ],
     limitations: ["Deterministic session fixture, not a model answer"],
   }
   const context = {
@@ -62,19 +72,20 @@ async function setup() {
       },
     },
     model: {
-      list: async () => ({
-        data: [
-          {
+      list: async () => {
+        if (modelError) throw modelError
+        return {
+          data: (guided ? ["small", "mid"] : ["small"]).map((id) => ({
             providerID: "fixture",
-            id: "small",
+            id,
             enabled: true,
             variants: [],
             capabilities: { tools: true, input: ["text"], output: ["text"] },
-          },
-        ],
-      }),
+          })),
+        }
+      },
     },
-    agent: { list: async () => ({ data: [{ id: "explorer" }] }) },
+    agent: { list: async () => ({ data: [{ id: "explorer" }, { id: "verifier" }] }) },
     tool: {
       transform: async (apply: (editor: Editor) => void) => {
         apply({ add: (tool: Tool) => tools.set(tool.name, tool) } as unknown as Editor)
@@ -155,6 +166,9 @@ async function setup() {
     disposed,
     cleanup,
     call,
+    failModelList: (error: Error) => {
+      modelError = error
+    },
     rpc: async (method: string, input: unknown, contract = "ai-orchestration.desktop") =>
       wire(
         await handlers.get(contract)![method]!(wire(input), {
@@ -262,6 +276,7 @@ test("server contract wiring: chat proposes, trusted desktop approval saves mode
   }
   expect(f.disposed).toContain("ai-orchestration.desktop")
   expect(f.disposed).toContain("ai-orchestration.workflow")
+  expect(f.disposed).toContain("ai-orchestration.guided")
   expect(f.disposed).toContain("ai-orchestration.routing")
   expect(f.disposed).toContain("retry")
 })
@@ -376,6 +391,165 @@ test("workflow native tool rejects malformed inputs, other roles, and aborted ca
     expect(f.changed).toEqual([])
     expect(f.calls).toEqual([])
     expect(f.storageWrites).toEqual(["foundation"])
+  } finally {
+    await f.cleanup?.()
+  }
+})
+
+const guidedContract = "ai-orchestration.guided"
+const guidedOrigin = { sessionID: "origin" }
+
+async function guidedFixture() {
+  const f = await setup({ guided: true })
+  async function guided(method: string, fields: Record<string, unknown> = {}) {
+    return f.rpc(method, { ...guidedOrigin, ...fields }, guidedContract)
+  }
+  async function state() {
+    return (await guided("state")) as unknown as GuidedState
+  }
+  async function draft() {
+    for (const slot of ["small", "mid"]) {
+      const model = await f.rpc("proposeModel", {
+        ...guidedOrigin,
+        slot,
+        selection: `fixture/${slot}`,
+      })
+      expect(await f.rpc("approve", { ...guidedOrigin, ticketID: model.id })).toMatchObject({
+        ticketID: model.id,
+      })
+    }
+    return f.tool("orchestration_prepare_workflow", {
+      title: "Two-step guided check",
+      steps: [
+        {
+          id: "one",
+          task: "Inspect a marker",
+          agent: "explorer",
+          dependsOn: [],
+          difficulty: "easy",
+        },
+        {
+          id: "two",
+          task: "Check the marker summary",
+          agent: "verifier",
+          dependsOn: ["one"],
+          difficulty: "medium",
+        },
+      ],
+    })
+  }
+  async function settled(stepID: string) {
+    for (let i = 0; i < 30; i++) {
+      const step = (await state()).workflows[0]?.steps.find((entry) => entry.id === stepID)
+      if (step && !["starting", "running"].includes(step.state)) return step
+      await Bun.sleep(1)
+    }
+    throw new Error("Guided fixture did not settle")
+  }
+  return { ...f, guided, state, draft, settled }
+}
+
+test("native guided RPC walks a scoped draft one separately approved step at a time", async () => {
+  const f = await guidedFixture()
+  try {
+    const draft = await f.draft()
+    const writes = [...f.storageWrites]
+    expect(await f.guided("begin", { sessionID: "other", draftID: draft.id })).toMatchObject({
+      ok: false,
+    })
+    expect(await f.rpc("start", draft.id, "ai-orchestration.routing")).toMatchObject({ ok: false })
+    const { id: workflowID } = await f.guided("begin", { draftID: draft.id })
+    expect(typeof workflowID).toBe("string")
+    expect(await f.guided("begin", { draftID: draft.id })).toEqual({ id: workflowID })
+    expect(await f.guided("state", { sessionID: "other" })).toMatchObject({ workflows: [] })
+    expect((await f.state()).workflows[0]?.steps.map((step) => step.state)).toEqual([
+      "ready",
+      "waiting",
+    ])
+    expect(await f.guided("review", { workflowID, stepID: "two" })).toMatchObject({ ok: false })
+
+    const firstReview = await f.guided("review", { workflowID, stepID: "one" })
+    expect(firstReview).toMatchObject({ workflowID, model: "fixture/small", previousResults: [] })
+    expect(JSON.stringify(firstReview)).not.toContain('"planID"')
+    for (const id of [draft.id, workflowID, firstReview.id]) {
+      expect(await f.rpc("start", id, "ai-orchestration.routing")).toMatchObject({ ok: false })
+      expect(await f.rpc("approve", { ...guidedOrigin, ticketID: id })).toMatchObject({ ok: false })
+    }
+    expect(
+      await f.guided("approve", { sessionID: "other", reviewID: firstReview.id }),
+    ).toMatchObject({ ok: false })
+    expect(f.calls).toEqual([])
+
+    expect(await f.guided("approve", { reviewID: firstReview.id })).toEqual({ id: workflowID })
+    const first = await f.settled("one")
+    expect(first).toMatchObject({ state: "completed", summary: "DESKTOP_CHAT_OK" })
+    expect(typeof first.runID).toBe("string")
+    expect(await f.rpc("run", `status ${first.runID}`, "ai-orchestration.routing")).toMatchObject({
+      ok: false,
+    })
+    expect(f.calls.map((entry) => entry.action)).toEqual(["create", "prompt", "wait"])
+    expect(await f.guided("approve", { reviewID: firstReview.id })).toMatchObject({ ok: false })
+    expect((await f.state()).workflows[0]?.steps.map((step) => step.state)).toEqual([
+      "completed",
+      "ready",
+    ])
+
+    const declined = await f.guided("review", { workflowID, stepID: "two" })
+    expect(declined.previousResults).toEqual([])
+    expect(await f.guided("dismiss", { reviewID: declined.id })).toEqual({ id: declined.id })
+    expect(await f.guided("approve", { reviewID: declined.id })).toMatchObject({ ok: false })
+    const secondReview = await f.guided("review", {
+      workflowID,
+      stepID: "two",
+      includeDependencySummaries: true,
+    })
+    expect(secondReview).toMatchObject({
+      model: "fixture/mid",
+      previousResults: [{ stepID: "one", runID: first.runID, summary: "DESKTOP_CHAT_OK" }],
+    })
+    expect(f.calls.filter((entry) => entry.action === "create")).toHaveLength(1)
+    expect(await f.guided("approve", { reviewID: secondReview.id })).toEqual({ id: workflowID })
+    expect(await f.settled("two")).toMatchObject({ state: "completed", summary: "DESKTOP_CHAT_OK" })
+    expect((await f.state()).workflows[0]?.state).toBe("completed")
+    expect(
+      f.calls.filter((entry) => entry.action === "create").map((entry) => entry.input),
+    ).toEqual([
+      expect.objectContaining({ agent: "explorer", model: { providerID: "fixture", id: "small" } }),
+      expect.objectContaining({ agent: "verifier", model: { providerID: "fixture", id: "mid" } }),
+    ])
+    const prompts = f.calls.filter((entry) => entry.action === "prompt")
+    expect(prompts).toHaveLength(2)
+    expect(prompts[0]?.input).toMatchObject({
+      text: expect.stringContaining('"previousResults":[]'),
+    })
+    expect(prompts[1]?.input).toMatchObject({
+      text: expect.stringContaining('"summary":"DESKTOP_CHAT_OK"'),
+    })
+    expect(f.storageWrites).toEqual(writes)
+    expect(
+      f.changed.every(
+        ({ name, data }) => name === "changed" && JSON.stringify(data) === '{"sessionID":"origin"}',
+      ),
+    ).toBe(true)
+  } finally {
+    await f.cleanup?.()
+  }
+})
+
+test("guided catalog failure is redacted and dispatches no specialist", async () => {
+  const f = await guidedFixture()
+  try {
+    const draft = await f.draft()
+    const { id: workflowID } = await f.guided("begin", { draftID: draft.id })
+    const review = await f.guided("review", { workflowID, stepID: "one" })
+    expect(review).toMatchObject({ workflowID, model: "fixture/small" })
+    f.failModelList(new Error("Authorization: Bearer fixture-secret-value"))
+    const approval = await f.guided("approve", { reviewID: review.id })
+    expect(approval).toMatchObject({ ok: false })
+    const state = await f.state()
+    expect(state.workflows[0]?.steps.map((step) => step.state)).toEqual(["failed", "blocked"])
+    expect(JSON.stringify({ approval, state })).not.toContain("fixture-secret-value")
+    expect(f.calls).toEqual([])
   } finally {
     await f.cleanup?.()
   }

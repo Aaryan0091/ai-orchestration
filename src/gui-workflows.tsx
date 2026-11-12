@@ -1,6 +1,8 @@
 import type { Context, SessionRef } from "@opencode/plugin/gui"
 import { For, Show, createEffect, createSignal, on, onCleanup, untrack } from "solid-js"
 import { type DesktopScope, createLatestRead, sameScope } from "./gui-controller.ts"
+import { createGuidedControls, GuidedWorkflowRuns } from "./gui-guided-workflows.tsx"
+import { draftCanRun } from "./gui-guided-controller.ts"
 import { createWorkflowActions, matchesWorkflowEvent } from "./gui-workflow-controller.ts"
 import { type WorkflowDraft, workflowRpc } from "./workflow-rpc.ts"
 
@@ -28,6 +30,7 @@ export function WorkflowDrafts(props: {
   refreshVersion: number
 }) {
   const ctx = props.ctx
+  const guided = createGuidedControls(props)
   const [lifecycle, setLifecycle] = createSignal<WorkflowView>()
   const view = () => {
     const value = lifecycle()
@@ -222,35 +225,58 @@ export function WorkflowDrafts(props: {
   }
 
   return (
-    <section aria-labelledby="oc-workflows">
-      <h3 id="oc-workflows">Workflow drafts</h3>
-      <p class="oc-orchestration-muted">
-        Ask Orchestrator for a multi-step plan in this chat. Drafts are previews and cannot run.
-      </p>
-      <Show when={view()?.loading() && !view()?.drafts()}>
-        <p role="status">Loading workflow drafts…</p>
-      </Show>
-      <Show when={view()?.error()}>
-        {(error) => (
-          <p role="alert" class="oc-orchestration-error">
-            {error()}
-          </p>
-        )}
-      </Show>
-      <Show when={view()?.drafts()?.length === 0}>
-        <p class="oc-orchestration-muted">No workflow drafts in this chat.</p>
-      </Show>
-      <For each={view()?.drafts()}>
-        {(draft) => (
-          <div class="oc-orchestration-row">
-            <div>
-              <strong class="oc-workflow-draft-title">{draft.title}</strong>
-              <p class="oc-orchestration-muted">{draft.steps.length} steps · Preview only</p>
+    <>
+      <section aria-labelledby="oc-workflows">
+        <h3 id="oc-workflows">Workflow drafts</h3>
+        <p class="oc-orchestration-muted">
+          Ask Orchestrator for a multi-step plan in this chat. Setting up a guided run creates a
+          separate workflow without starting any steps.
+        </p>
+        <Show when={view()?.loading() && !view()?.drafts()}>
+          <p role="status">Loading workflow drafts…</p>
+        </Show>
+        <Show when={view()?.error()}>
+          {(error) => (
+            <p role="alert" class="oc-orchestration-error">
+              {error()}
+            </p>
+          )}
+        </Show>
+        <Show when={view()?.drafts()?.length === 0}>
+          <p class="oc-orchestration-muted">No workflow drafts in this chat.</p>
+        </Show>
+        <For each={view()?.drafts()}>
+          {(draft) => (
+            <div class="oc-orchestration-row">
+              <div>
+                <strong class="oc-workflow-draft-title">{draft.title}</strong>
+                <p class="oc-orchestration-muted">{draft.steps.length} steps · Preview only</p>
+                <Show when={!draftCanRun(draft)}>
+                  <p class="oc-orchestration-muted">
+                    Set compatible models for the blocked tiers and prepare a new draft to set up a
+                    guided run.
+                  </p>
+                </Show>
+              </div>
+              <div class="oc-orchestration-actions">
+                <ctx.ui.Button onClick={() => review(draft)}>Review draft</ctx.ui.Button>
+                <ctx.ui.Button
+                  disabled={
+                    !guided.view()?.workflows() ||
+                    guided.view()?.busy() ||
+                    guided.alreadySetUp(draft.id) ||
+                    !draftCanRun(draft)
+                  }
+                  onClick={() => guided.setUp(draft)}
+                >
+                  {guided.alreadySetUp(draft.id) ? "Guided run set up" : "Set up guided run"}
+                </ctx.ui.Button>
+              </div>
             </div>
-            <ctx.ui.Button onClick={() => review(draft)}>Review draft</ctx.ui.Button>
-          </div>
-        )}
-      </For>
-    </section>
+          )}
+        </For>
+      </section>
+      <GuidedWorkflowRuns ctx={ctx} controls={guided} />
+    </>
   )
 }
