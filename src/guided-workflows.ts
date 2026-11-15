@@ -4,6 +4,23 @@ import type { GuidedReview, GuidedState, GuidedStep, GuidedWorkflow } from "./gu
 import type { HandoffPackage } from "./handoffs.ts"
 import { formatSelection, parseSelection } from "./routing.ts"
 import type { WorkflowDraft } from "./workflow-rpc.ts"
+import {
+  type CommandVerificationResult,
+  VerificationError,
+  parseVerificationSpec,
+  verifyStep,
+  verifySummary,
+} from "./verification.ts"
+
+/** Internal trusted adapter contract, never accepted by a model-facing tool or guided RPC. */
+export interface CommandVerificationTarget {
+  sessionID: string
+  directory: string
+  workflowID: string
+  stepID: string
+  runID: string
+  command: string
+}
 
 const reviewTTL = 10 * 60 * 1000
 const maxWorkflows = 50
@@ -61,6 +78,21 @@ function isPending(step: GuidedStep) {
   return step.state === "waiting" || step.state === "ready" || step.state === "blocked"
 }
 
+/** Execution completion is distinct from the independently required acceptance outcome. */
+function verificationBlocks(step: GuidedStep) {
+  return (
+    step.state === "completed" &&
+    step.verification !== undefined &&
+    step.verificationResult?.status !== "passed"
+  )
+}
+
+function commandMayStillRun(step: GuidedStep) {
+  const status = step.commandResult?.status
+  // Missing native evidence is not proof of a stopped process, even without a shell ID.
+  return status === "pending" || status === "running" || status === "unverified"
+}
+
 function summarize(value: string, limit: number) {
   if (value.length <= limit) return value
   return `${value.slice(0, limit - 1).replace(/[\uD800-\uDBFF]$/, "")}…`
@@ -72,6 +104,7 @@ function applyRun(step: GuidedStep, run: TaskRun) {
   delete step.diagnostic
   if (run.state === "completed") {
     const report = run.specialistReport
+    step.verificationResult = verifyStep(step.verification, report?.summary, step.commandResult)
     if (report) step.summary = summarize(report.summary, 8000)
     if (!report) {
       step.state = "failed"
@@ -85,8 +118,10 @@ function applyRun(step: GuidedStep, run: TaskRun) {
         "The specialist did not report the completion check as passed. Dependent steps remain blocked."
     }
   } else if (run.state === "failed") {
+    step.verificationResult = verifyStep(step.verification, undefined, step.commandResult)
     step.diagnostic = "The specialist step failed. Inspect its session in OpenCode for details."
   } else if (run.state === "cancelled") {
+    step.verificationResult = verifyStep(step.verification, undefined, step.commandResult)
     step.diagnostic = "The specialist step was cancelled."
   } else if (run.state === "stopping") {
     step.diagnostic = stopUnconfirmed
@@ -178,7 +213,7 @@ export function createGuidedWorkflows(host: GuidedHost) {
       const run = host.engine.status(engineID)
       if (run.state !== "completed" || !run.specialistReport) throw error(missingResult)
       applyRun(dependency, run)
-      return dependency.state === "completed"
+      return dependency.state === "completed" && !verificationBlocks(dependency)
     } catch {
       dependency.state = "failed"
       dependency.diagnostic = missingResult
@@ -192,7 +227,9 @@ export function createGuidedWorkflows(host: GuidedHost) {
     const active = view.steps.some(isActive)
     const stopped =
       record.stopRequested ||
-      view.steps.some((step) => step.state === "failed" || step.state === "cancelled")
+      view.steps.some(
+        (step) => step.state === "failed" || step.state === "cancelled" || verificationBlocks(step),
+      )
     const next = view.steps.find(isPending)
     if (!stopped && !active && next) {
       // If the engine lost a prerequisite result (e.g. eviction), refuse to advance.
@@ -201,7 +238,8 @@ export function createGuidedWorkflows(host: GuidedHost) {
         if (dependency.state === "completed") confirmDependency(record, dependency)
       }
     }
-    const halted = stopped || view.steps.some((step) => step.state === "failed")
+    const halted =
+      stopped || view.steps.some((step) => step.state === "failed" || verificationBlocks(step))
     for (const step of view.steps.filter(isPending)) {
       if (halted) {
         step.state = "blocked"
@@ -238,7 +276,10 @@ export function createGuidedWorkflows(host: GuidedHost) {
     if (workflows.size < maxWorkflows && owned.length < maxPerChat) return
     const oldestTerminal = owned.find((record) => {
       refresh(record)
-      return record.view.state === "completed" || record.view.state === "stopped"
+      return (
+        (record.view.state === "completed" || record.view.state === "stopped") &&
+        !record.view.steps.some(commandMayStillRun)
+      )
     })
     if (!oldestTerminal)
       throw error("The guided workflow limit was reached. No specialist was started.")
@@ -316,12 +357,25 @@ export function createGuidedWorkflows(host: GuidedHost) {
     },
 
     async review(raw: unknown, signal?: AbortSignal): Promise<GuidedReview> {
-      const input = object(raw, ["sessionID", "workflowID", "stepID", "includeDependencySummaries"])
+      const input = object(raw, [
+        "sessionID",
+        "workflowID",
+        "stepID",
+        "includeDependencySummaries",
+        "verification",
+      ])
       const sessionID = identifier(input.sessionID)
       const workflowID = identifier(input.workflowID)
       const stepID = identifier(input.stepID)
       const include = input.includeDependencySummaries
       if (include !== undefined && typeof include !== "boolean") throw invalid()
+      let verification
+      try {
+        verification = parseVerificationSpec(input.verification)
+      } catch (cause) {
+        if (cause instanceof VerificationError) throw error(cause.message)
+        throw invalid()
+      }
       await checkSession(sessionID, signal)
       const record = owned(sessionID, workflowID)
       const step = nextStep(record, stepID)
@@ -352,6 +406,7 @@ export function createGuidedWorkflows(host: GuidedHost) {
         agent: step.agent,
         model: step.model,
         previousResults,
+        ...(verification ? { verification } : {}),
       }
       reviews.set(reviewID, review)
       return structuredClone(review)
@@ -366,6 +421,10 @@ export function createGuidedWorkflows(host: GuidedHost) {
       const record = owned(sessionID, review.workflowID)
       const step = nextStep(record, review.stepID)
       reviews.delete(reviewID)
+      if (review.verification) step.verification = structuredClone(review.verification)
+      else delete step.verification
+      delete step.verificationResult
+      delete step.commandResult
       step.state = "starting"
       record.view.state = "running"
       let planID: string | undefined
@@ -376,7 +435,14 @@ export function createGuidedWorkflows(host: GuidedHost) {
           objective: review.task,
           files: [],
           findings: [],
-          constraints: ["Perform only the approved workflow step. Do not dispatch other tasks."],
+          constraints: [
+            "Perform only the approved workflow step. Do not dispatch other tasks.",
+            ...(review.verification?.summaryEquals !== undefined
+              ? [
+                  `The user will independently compare the full report summary for exact equality with the literal text after the next newline. Preserve its whitespace. This check does not prove the underlying work. Literal expected text:\n${review.verification.summaryEquals}`,
+                ]
+              : []),
+          ],
           previousResults: review.previousResults.map(({ runID, summary }) => ({ runID, summary })),
           acceptanceChecks: [completionCheck],
         }
@@ -481,6 +547,80 @@ export function createGuidedWorkflows(host: GuidedHost) {
       refresh(record)
       await notify(sessionID)
       return { id: workflowID }
+    },
+
+    /** A command adapter must obtain this target before asking for native shell approval. */
+    async commandTarget(raw: unknown, signal?: AbortSignal): Promise<CommandVerificationTarget> {
+      const input = object(raw, ["sessionID", "workflowID", "stepID"])
+      const sessionID = identifier(input.sessionID)
+      const workflowID = identifier(input.workflowID)
+      const stepID = identifier(input.stepID)
+      await checkSession(sessionID, signal)
+      const record = owned(sessionID, workflowID)
+      refresh(record)
+      const step = stepFor(record, stepID)
+      try {
+        const engineID = record.engineRuns.get(step.id)
+        if (!engineID) throw error(missingResult)
+        applyRun(step, host.engine.status(engineID))
+      } catch {
+        throw error("The completed specialist result is unavailable. No command may start.")
+      }
+      if (
+        record.stopRequested ||
+        step.state !== "completed" ||
+        !step.runID ||
+        !step.verification?.command
+      )
+        throw error("This step is not available for an independent command check.")
+      if (
+        step.verification.summaryEquals !== undefined &&
+        verifySummary(step.verification, step.summary).status !== "passed"
+      )
+        throw error("The required summary check did not pass. No verification command may start.")
+      return {
+        sessionID,
+        directory,
+        workflowID,
+        stepID,
+        runID: step.runID,
+        command: step.verification.command,
+      }
+    },
+
+    /** Only locally observed native-shell evidence may call this internal method. */
+    async recordCommandResult(
+      target: CommandVerificationTarget,
+      result: CommandVerificationResult,
+      signal?: AbortSignal,
+    ) {
+      await checkSession(target.sessionID, signal)
+      const record = owned(target.sessionID, target.workflowID)
+      refresh(record)
+      const step = stepFor(record, target.stepID)
+      if (
+        target.directory !== directory ||
+        step.runID !== target.runID ||
+        step.state !== "completed" ||
+        !step.verification?.command ||
+        step.verification.command !== target.command ||
+        result.command !== target.command ||
+        result.source !== "native-shell" ||
+        (result.status === "passed" &&
+          (result.exitCode !== 0 || !result.shellID || !result.ticketID)) ||
+        (step.commandResult?.ticketID !== undefined &&
+          result.ticketID !== step.commandResult.ticketID) ||
+        (step.commandResult &&
+          ["passed", "failed", "cancelled"].includes(step.commandResult.status) &&
+          JSON.stringify(step.commandResult) !== JSON.stringify(result))
+      )
+        throw error("The independent command result does not match the approved step.")
+      step.commandResult = structuredClone(result)
+      const engineID = record.engineRuns.get(step.id)
+      if (!engineID) throw error(missingResult)
+      applyRun(step, host.engine.status(engineID))
+      refresh(record)
+      await notify(target.sessionID)
     },
 
     async dispose() {

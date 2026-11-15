@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import type { Plugin } from "@opencode/plugin"
 import server from "../src/index.ts"
 import type { GuidedState } from "../src/guided-rpc.ts"
+import type { NativeShellEvent } from "../src/command-verification.ts"
 
 type Editor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0]
 type Tool = Parameters<Editor["add"]>[0]
@@ -35,6 +36,8 @@ async function setup({ guided = false } = {}) {
   const disposed: string[] = []
   let child = 0
   let modelError: Error | undefined
+  const nativeEvents: NativeShellEvent[] = []
+  let wakeEvents: (() => void) | undefined
   const report = {
     version: 1,
     summary: "DESKTOP_CHAT_OK",
@@ -60,6 +63,29 @@ async function setup({ guided = false } = {}) {
   const context = {
     options: {},
     location: { directory: "/integration-desktop" },
+    event: {
+      subscribe: async function* ({ signal }: { signal: AbortSignal }) {
+        const wake = () => wakeEvents?.()
+        signal.addEventListener("abort", wake, { once: true })
+        try {
+          while (!signal.aborted) {
+            const event = nativeEvents.shift()
+            if (event) yield event
+            else
+              await new Promise<void>((resolve) => {
+                wakeEvents = resolve
+              })
+          }
+        } finally {
+          signal.removeEventListener("abort", wake)
+        }
+      },
+    },
+    permission: {
+      assert: async (input: unknown) => {
+        calls.push({ action: "permission", input: wire(input) })
+      },
+    },
     storage: {
       get: async (key: string) => saved.get(key),
       set: async (key: string, value: unknown) => {
@@ -104,7 +130,7 @@ async function setup({ guided = false } = {}) {
       }),
       get: async ({ sessionID }: { sessionID: string }) =>
         sessionID.startsWith("child-")
-          ? { outcome: "succeeded" }
+          ? { outcome: "succeeded", location: { directory: "/integration-desktop" } }
           : {
               location: {
                 directory:
@@ -113,7 +139,7 @@ async function setup({ guided = false } = {}) {
             },
       create: async (input: unknown) => {
         calls.push({ action: "create", input: wire(input) })
-        return { id: `child-${++child}` }
+        return { id: `child-${++child}`, location: { directory: "/integration-desktop" } }
       },
       prompt: async (input: unknown) => {
         calls.push({ action: "prompt", input: wire(input) })
@@ -166,6 +192,11 @@ async function setup({ guided = false } = {}) {
     disposed,
     cleanup,
     call,
+    nativeEvent: async (event: NativeShellEvent) => {
+      nativeEvents.push(event)
+      wakeEvents?.()
+      await Bun.sleep(0)
+    },
     failModelList: (error: Error) => {
       modelError = error
     },
@@ -277,6 +308,7 @@ test("server contract wiring: chat proposes, trusted desktop approval saves mode
   expect(f.disposed).toContain("ai-orchestration.desktop")
   expect(f.disposed).toContain("ai-orchestration.workflow")
   expect(f.disposed).toContain("ai-orchestration.guided")
+  expect(f.disposed).toContain("ai-orchestration.command-verification")
   expect(f.disposed).toContain("ai-orchestration.routing")
   expect(f.disposed).toContain("retry")
 })
@@ -531,6 +563,165 @@ test("native guided RPC walks a scoped draft one separately approved step at a t
         ({ name, data }) => name === "changed" && JSON.stringify(data) === '{"sessionID":"origin"}',
       ),
     ).toBe(true)
+  } finally {
+    await f.cleanup?.()
+  }
+})
+
+test("trusted verification criteria survive JSON RPC without agent-authored verdicts or approval replacement", async () => {
+  for (const expected of ["DESKTOP_CHAT_OK", "WRONG_EXPECTED_MARKER"]) {
+    const f = await guidedFixture()
+    try {
+      const draft = await f.draft()
+      const { id: workflowID } = await f.guided("begin", { draftID: draft.id })
+      for (const verification of [
+        {},
+        { summaryEquals: "" },
+        { summaryEquals: expected, passed: true },
+      ])
+        expect(await f.guided("review", { workflowID, stepID: "one", verification })).toMatchObject(
+          {
+            ok: false,
+            error: { message: expect.stringContaining("Verification must contain only") },
+          },
+        )
+      expect(
+        await f.tool("orchestration_prepare_workflow", {
+          title: "Agent cannot configure independent verification",
+          steps: [
+            {
+              id: "one",
+              task: "Inspect",
+              agent: "explorer",
+              dependsOn: [],
+              verification: { summaryEquals: "FAKE" },
+            },
+          ],
+        }),
+      ).toMatchObject({ ok: false })
+      const review = await f.guided("review", {
+        workflowID,
+        stepID: "one",
+        verification: { summaryEquals: expected },
+      })
+      expect(review.verification).toEqual({ summaryEquals: expected })
+      expect(f.calls).toEqual([])
+      expect(
+        await f.guided("approve", {
+          reviewID: review.id,
+          verification: { summaryEquals: "REPLACEMENT" },
+        }),
+      ).toMatchObject({ ok: false })
+      await f.guided("approve", { reviewID: review.id })
+      const step = await f.settled("one")
+      expect(step.state).toBe("completed")
+      expect(step.verificationResult).toMatchObject({
+        status: expected === "DESKTOP_CHAT_OK" ? "passed" : "failed",
+        source: "local-summary-equality",
+        expectedSummary: expected,
+        actualSummary: "DESKTOP_CHAT_OK",
+      })
+      expect((await f.state()).workflows[0]?.steps[1]?.state).toBe(
+        expected === "DESKTOP_CHAT_OK" ? "ready" : "blocked",
+      )
+      expect(f.calls.filter((entry) => entry.action === "prompt")).toHaveLength(1)
+      expect(f.tools.has("orchestration_verify")).toBe(false)
+      expect(f.tools.has("orchestration_run_command")).toBe(false)
+    } finally {
+      await f.cleanup?.()
+    }
+  }
+})
+
+test("required native command check is separately permissioned, scoped, and gates dependent dispatch", async () => {
+  const f = await guidedFixture()
+  const contract = "ai-orchestration.command-verification"
+  try {
+    const draft = await f.draft()
+    const { id: workflowID } = await f.guided("begin", { draftID: draft.id })
+    const review = await f.guided("review", {
+      workflowID,
+      stepID: "one",
+      verification: { summaryEquals: "DESKTOP_CHAT_OK", command: "bun test" },
+    })
+    await f.guided("approve", { reviewID: review.id })
+    expect((await f.settled("one")).verificationResult?.status).toBe("unverified")
+    expect((await f.state()).workflows[0]?.steps[1]?.state).toBe("blocked")
+    expect(f.calls.filter((entry) => entry.action === "permission")).toHaveLength(0)
+    expect(
+      await f.rpc("prepare", { sessionID: "other", workflowID, stepID: "one" }, contract),
+    ).toMatchObject({ ok: false })
+    expect(
+      await f.rpc(
+        "prepare",
+        { sessionID: "origin", workflowID, stepID: "one", command: "REPLACEMENT" },
+        contract,
+      ),
+    ).toMatchObject({ ok: false })
+    const ticket = await f.rpc(
+      "prepare",
+      { sessionID: "origin", workflowID, stepID: "one" },
+      contract,
+    )
+    expect(ticket).toMatchObject({
+      command: "bun test",
+      executionCommand: "bun test",
+      timeoutMs: 30000,
+    })
+    expect(f.calls.filter((entry) => entry.action === "permission")).toEqual([
+      {
+        action: "permission",
+        input: expect.objectContaining({
+          agent: "verifier",
+          action: "shell",
+          resources: ["bun test"],
+        }),
+      },
+    ])
+    expect((await f.state()).workflows[0]?.steps[1]?.state).toBe("blocked")
+    expect(await f.rpc("status", { sessionID: "other", id: ticket.id }, contract)).toMatchObject({
+      ok: false,
+    })
+    expect(
+      await f.rpc("status", { sessionID: "origin", id: ticket.id, passed: true }, contract),
+    ).toMatchObject({ ok: false })
+    const metadata = ticket.metadata as Record<string, unknown>
+    await f.nativeEvent({
+      type: "shell.created",
+      location: { directory: "/integration-desktop" },
+      data: {
+        info: {
+          id: "native-check-shell",
+          command: "bun test",
+          cwd: "/integration-desktop",
+          metadata,
+        },
+      },
+    })
+    expect((await f.state()).workflows[0]?.steps[0]?.commandResult?.status).toBe("running")
+    await f.nativeEvent({
+      type: "shell.exited",
+      location: { directory: "/integration-desktop" },
+      data: { id: "native-check-shell", status: "exited", exit: 0 },
+    })
+    const state = await f.state()
+    expect(state.workflows[0]?.steps[0]?.verificationResult).toMatchObject({
+      status: "passed",
+      source: "local-checks",
+    })
+    expect(state.workflows[0]?.steps[1]?.state).toBe("ready")
+    expect(
+      (await f.rpc("status", { sessionID: "origin", id: ticket.id }, contract)).result,
+    ).toMatchObject({
+      source: "native-shell",
+      status: "passed",
+      exitCode: 0,
+      shellID: "native-check-shell",
+    })
+    expect(
+      await f.rpc("prepare", { sessionID: "origin", workflowID, stepID: "one" }, contract),
+    ).toMatchObject({ ok: false })
+    expect(f.calls.filter((entry) => entry.action === "prompt")).toHaveLength(1)
   } finally {
     await f.cleanup?.()
   }

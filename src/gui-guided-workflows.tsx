@@ -1,6 +1,17 @@
 import { type Context, type SessionRef, usePanel } from "@opencode/plugin/gui"
-import { For, Show, createEffect, createSignal, on, onCleanup, untrack } from "solid-js"
+import {
+  For,
+  Show,
+  createEffect,
+  createSignal,
+  createUniqueId,
+  on,
+  onCleanup,
+  untrack,
+} from "solid-js"
 import { type DesktopScope, createLatestRead, sameScope } from "./gui-controller.ts"
+import { commandVerificationRpc } from "./command-verification-rpc.ts"
+import { canRunCommandVerification, createGuiCommandActions } from "./gui-command-verification.ts"
 import {
   createGuidedActions,
   createGuidedDecision,
@@ -9,6 +20,12 @@ import {
 } from "./gui-guided-controller.ts"
 import { matchesWorkflowEvent } from "./gui-workflow-controller.ts"
 import { type GuidedReview, type GuidedStep, type GuidedWorkflow, guidedRpc } from "./guided-rpc.ts"
+import {
+  type VerificationSpec,
+  VERIFICATION_COMMAND_MAX_LENGTH,
+  VERIFICATION_SUMMARY_MAX_LENGTH,
+  parseVerificationSpec,
+} from "./verification.ts"
 import type { WorkflowDraft } from "./workflow-rpc.ts"
 
 type GuidedProps = {
@@ -20,6 +37,7 @@ type GuidedProps = {
 type GuidedView = {
   active(): boolean
   actions: ReturnType<typeof createGuidedActions>
+  commands: ReturnType<typeof createGuiCommandActions>
   workflows(): GuidedWorkflow[] | undefined
   error(): string
   loading(): boolean
@@ -64,6 +82,18 @@ export function createGuidedControls(props: GuidedProps) {
     // Use the originating project's native client; event contents are hints only.
     // https://opencode.ai/docs/build/plugins/rpc#subscribe
     const rpc = client.rpc(guidedRpc)
+    const commandRpc = client.rpc(commandVerificationRpc)
+    const commandOptions = () => ({
+      location: { directory: scope.directory },
+      signal: AbortSignal.any([ctx.signal, abort.signal, AbortSignal.timeout(45_000)]),
+    })
+    const commands = createGuiCommandActions(scope, active, {
+      prepare: (input) => commandRpc.prepare(input, commandOptions()),
+      status: (input) => commandRpc.status(input, commandOptions()),
+      cancel: (input) => commandRpc.cancel(input, commandOptions()),
+      create: (input) => client.shell.create(input),
+      remove: (input) => client.shell.remove(input),
+    })
     const actions = createGuidedActions(scope, active, (input) => {
       const options = {
         location: { directory: scope.directory },
@@ -82,6 +112,7 @@ export function createGuidedControls(props: GuidedProps) {
               workflowID: input.workflowID,
               stepID: input.stepID,
               includeDependencySummaries: input.includeDependencySummaries,
+              ...(input.verification ? { verification: input.verification } : {}),
             },
             options,
           )
@@ -102,7 +133,22 @@ export function createGuidedControls(props: GuidedProps) {
       const latest = beginRead()
       setLoading(true)
       try {
-        const value = await actions.state()
+        let value = await actions.state()
+        const commandUpdates = await Promise.all(
+          value.flatMap((workflow) =>
+            workflow.steps
+              .filter(
+                (step) =>
+                  step.verification?.command &&
+                  step.state === "completed" &&
+                  (!step.commandResult ||
+                    step.commandResult.status === "pending" ||
+                    step.commandResult.status === "running"),
+              )
+              .map((step) => commands.status(workflow, step)),
+          ),
+        )
+        if (commandUpdates.some(Boolean)) value = await actions.state()
         if (active() && latest()) setWorkflows(value)
       } catch (cause) {
         if (active() && latest()) setError(readable(cause, "Could not load guided workflows."))
@@ -122,7 +168,15 @@ export function createGuidedControls(props: GuidedProps) {
         panel.visible() &&
         active() &&
         !loading() &&
-        workflows()?.some((workflow) => workflow.state === "running")
+        workflows()?.some(
+          (workflow) =>
+            workflow.state === "running" ||
+            workflow.steps.some(
+              (step) =>
+                step.commandResult?.status === "pending" ||
+                step.commandResult?.status === "running",
+            ),
+        )
       )
         void refresh()
     }, 2500)
@@ -135,6 +189,7 @@ export function createGuidedControls(props: GuidedProps) {
     setLifecycle({
       active,
       actions,
+      commands,
       workflows,
       error,
       loading,
@@ -232,7 +287,7 @@ export function createGuidedControls(props: GuidedProps) {
       return (
         <ctx.ui.Dialog
           title="Review guided step"
-          description="Approval runs only this step and sends its task and attached summaries to the shown model’s provider. It may spend credits (cost unknown) and uses existing project permissions."
+          description="Approval runs only this step and sends its task, attached summaries and any expected summary text to the shown model’s provider. The equality check runs locally, but its expected text is not private from the provider. It may spend credits (cost unknown) and uses existing project permissions."
           size="x-large"
           footer={
             <>
@@ -266,6 +321,34 @@ export function createGuidedControls(props: GuidedProps) {
               <strong>Acceptance check:</strong> The approved step objective was completed.
             </p>
             <Show
+              when={review.verification?.summaryEquals !== undefined}
+              fallback={<p>Exact-summary verification: not configured.</p>}
+            >
+              <>
+                <p>
+                  <strong>Local verification:</strong> The report summary must exactly equal the
+                  text below, including spaces and capitalization. A mismatch blocks later steps.
+                  This checks the summary only, not whether the underlying work is correct.
+                </p>
+                <pre class="oc-orchestration-preview">{review.verification?.summaryEquals}</pre>
+              </>
+            </Show>
+            <Show when={review.verification?.command !== undefined}>
+              <p>
+                <strong>Local command verification:</strong> After the specialist completes, this
+                exact command requires a separate confirmation. It runs with your local project
+                permissions, may change files or access the network, and is not sent to the model’s
+                provider. Only the command’s exit status verifies this check.
+              </p>
+              <pre class="oc-orchestration-preview">{review.verification?.command}</pre>
+            </Show>
+            <Show when={!review.verification}>
+              <p>
+                No independent verification configured. The result remains unverified; progression
+                uses the specialist’s self-reported checks.
+              </p>
+            </Show>
+            <Show
               when={review.previousResults.length > 0}
               fallback={<p>No previous results are attached.</p>}
             >
@@ -290,11 +373,16 @@ export function createGuidedControls(props: GuidedProps) {
     })
   }
 
-  function reviewStep(workflow: GuidedWorkflow, step: GuidedStep, include: boolean) {
+  function reviewStep(
+    workflow: GuidedWorkflow,
+    step: GuidedStep,
+    include: boolean,
+    verification?: VerificationSpec,
+  ) {
     const owner = view()
     if (!owner || currentStep(owner, workflow.id, step.id)?.state !== "ready") return
     void owner.run(async () => {
-      openReview(owner, await owner.actions.review(workflow, step, include))
+      openReview(owner, await owner.actions.review(workflow, step, include, verification))
     }, "Could not prepare a review for this step.")
   }
 
@@ -364,7 +452,82 @@ export function createGuidedControls(props: GuidedProps) {
     })
   }
 
-  return { view, alreadySetUp, setUp, reviewStep, confirmCancel }
+  function confirmCommand(workflow: GuidedWorkflow, step: GuidedStep, stopping = false) {
+    const currentOwner = view()
+    const command = step.verification?.command
+    if (!currentOwner || currentOwner.busy() || !command) return
+    const owner = currentOwner
+    const available = () => {
+      const current = currentStep(owner, workflow.id, step.id)
+      if (!current || current.verification?.command !== command) return false
+      return stopping
+        ? current.commandResult?.status === "pending" ||
+            current.commandResult?.status === "running" ||
+            (current.commandResult?.status === "unverified" && !!current.commandResult.shellID)
+        : canRunCommandVerification(current)
+    }
+    if (!available()) return
+    ctx.dialogs.open((dialog) => {
+      const [submitting, setSubmitting] = createSignal(false)
+      const [finished, setFinished] = createSignal(false)
+      createEffect(() => {
+        if (!owner.active() || (!available() && !submitting() && !finished())) dialog.close()
+      })
+      async function decide() {
+        if (!available() || owner.busy() || submitting() || finished()) return
+        setSubmitting(true)
+        setFinished(true)
+        await owner.run(async () => {
+          try {
+            if (stopping) {
+              dialog.close()
+              await owner.commands.cancel(workflow, step)
+            } else await owner.commands.run(workflow, step, () => dialog.close())
+          } catch (cause) {
+            throw new Error(
+              `${readable(cause, "Command action could not be confirmed.")} Do not dispatch again. Refresh and inspect the command status or native shell.`,
+            )
+          } finally {
+            void owner.refresh()
+          }
+        }, "Command action could not be confirmed. Refresh and inspect its status.")
+      }
+      return (
+        <ctx.ui.Dialog
+          title={stopping ? "Stop verification command?" : "Run approved verification command?"}
+          description={
+            stopping
+              ? "Requests a stop of the observed native shell. Files, network actions and other effects already performed cannot be undone. Only a native shell event confirms termination."
+              : "Runs this exact frozen command locally in the shown project, separately from the specialist. This dialog closes so you can answer the native shell permission request in this chat. It may modify files, access the network or use external services with your permissions. The native timeout is 30 seconds. No model executes this command or receives its text/output. A zero exit code only proves this chosen check passed."
+          }
+          size="x-large"
+          footer={
+            <>
+              <ctx.ui.Button autofocus disabled={submitting()} onClick={() => dialog.close()}>
+                Close
+              </ctx.ui.Button>
+              <ctx.ui.Button
+                variant={stopping ? "danger" : "contrast"}
+                busy={submitting()}
+                disabled={submitting() || finished() || !available()}
+                onClick={() => void decide()}
+              >
+                {stopping ? "Request command stop" : "Run command once"}
+              </ctx.ui.Button>
+            </>
+          }
+        >
+          <div class="oc-orchestration-review">
+            <p>Project: {workflow.directory}</p>
+            <p>Step: {step.task}</p>
+            <pre class="oc-orchestration-preview">{command}</pre>
+          </div>
+        </ctx.ui.Dialog>
+      )
+    })
+  }
+
+  return { view, alreadySetUp, setUp, reviewStep, confirmCancel, confirmCommand }
 }
 
 type GuidedControls = ReturnType<typeof createGuidedControls>
@@ -377,11 +540,43 @@ function GuidedStepRow(props: {
 }) {
   const ctx = props.ctx
   const [include, setInclude] = createSignal(false)
+  const [verifySummary, setVerifySummary] = createSignal(false)
+  const [expectedSummary, setExpectedSummary] = createSignal("")
+  const [verifyCommand, setVerifyCommand] = createSignal(false)
+  const [command, setCommand] = createSignal("")
+  const [criterionError, setCriterionError] = createSignal("")
+  const summaryID = createUniqueId()
+  const hintID = `${summaryID}-hint`
+  const errorID = `${summaryID}-error`
+  const commandID = `${summaryID}-command`
+  function review() {
+    setCriterionError("")
+    let verification: VerificationSpec | undefined
+    if (verifySummary() || verifyCommand()) {
+      try {
+        verification = parseVerificationSpec({
+          ...(verifySummary() ? { summaryEquals: expectedSummary() } : {}),
+          ...(verifyCommand() ? { command: command() } : {}),
+        })
+      } catch {
+        setCriterionError(
+          `Enabled checks require nonblank text without NUL characters: expected summary at most ${VERIFICATION_SUMMARY_MAX_LENGTH} characters; command at most ${VERIFICATION_COMMAND_MAX_LENGTH}.`,
+        )
+        return
+      }
+    }
+    props.controls.reviewStep(props.workflow, props.step, include(), verification)
+  }
+  function boundedEvidence(value: string) {
+    return value.length > VERIFICATION_SUMMARY_MAX_LENGTH
+      ? `${value.slice(0, VERIFICATION_SUMMARY_MAX_LENGTH)}… [truncated for display]`
+      : value
+  }
   return (
     <li>
       <strong>{props.step.task}</strong>
       <p>
-        <code>{props.step.id}</code> · {props.step.agent} · {props.step.state}
+        <code>{props.step.id}</code> · {props.step.agent} · Execution: {props.step.state}
       </p>
       <p class="oc-orchestration-muted">
         {props.step.difficulty} · {props.step.tier} · {props.step.model ?? "No model"}
@@ -407,10 +602,180 @@ function GuidedStepRow(props: {
       <Show when={props.step.diagnostic ?? props.step.blocker}>
         {(diagnostic) => <p class="oc-orchestration-error">{diagnostic()}</p>}
       </Show>
+      <Show when={props.step.verificationResult}>
+        {(result) => (
+          <div>
+            <p>
+              <strong>Local verification: {result().status}</strong> · {result().source}
+            </p>
+            <p>{result().diagnostic}</p>
+            <Show when={result().expectedSummary !== undefined}>
+              <p>Expected summary:</p>
+              <pre class="oc-orchestration-preview">
+                {boundedEvidence(result().expectedSummary ?? "")}
+              </pre>
+            </Show>
+            <Show when={result().actualSummary !== undefined}>
+              <p>Actual summary:</p>
+              <pre class="oc-orchestration-preview">
+                {boundedEvidence(result().actualSummary ?? "")}
+              </pre>
+            </Show>
+          </div>
+        )}
+      </Show>
+      <Show when={props.step.commandResult}>
+        {(result) => (
+          <div>
+            <p>
+              <strong>Native command verification: {result().status}</strong>
+            </p>
+            <p>{result().diagnostic}</p>
+            <Show when={result().shellID}>
+              <p>
+                Native shell: <code>{result().shellID}</code>
+              </p>
+            </Show>
+            <Show when={result().exitCode !== undefined}>
+              <p>Exit code: {result().exitCode}</p>
+            </Show>
+            <p class="oc-orchestration-muted">
+              Output is not collected. Exit zero means only this chosen command passed.
+            </p>
+          </div>
+        )}
+      </Show>
+      <Show when={canRunCommandVerification(props.step)}>
+        <div class="oc-orchestration-actions">
+          <ctx.ui.Button
+            disabled={props.controls.view()?.busy() ?? true}
+            onClick={() => props.controls.confirmCommand(props.workflow, props.step)}
+          >
+            Run approved command verification
+          </ctx.ui.Button>
+        </div>
+      </Show>
+      <Show
+        when={
+          props.step.commandResult?.status === "pending" ||
+          props.step.commandResult?.status === "running" ||
+          (props.step.commandResult?.status === "unverified" && !!props.step.commandResult.shellID)
+        }
+      >
+        <div class="oc-orchestration-actions">
+          <ctx.ui.Button
+            variant="ghost"
+            onClick={() => props.controls.confirmCommand(props.workflow, props.step, true)}
+          >
+            {props.step.commandResult?.status === "unverified"
+              ? "Retry command stop"
+              : "Stop verification command"}
+          </ctx.ui.Button>
+        </div>
+      </Show>
       <Show when={props.step.state === "stopping"}>
         <p role="status">Stop not yet confirmed. No further steps can start.</p>
       </Show>
       <Show when={props.step.state === "ready"}>
+        <label>
+          <input
+            type="checkbox"
+            checked={verifySummary()}
+            disabled={props.controls.view()?.busy() ?? true}
+            onChange={(event) => {
+              setVerifySummary(event.currentTarget.checked)
+              setCriterionError("")
+            }}
+          />{" "}
+          Verify the exact report summary locally
+        </label>
+        <Show when={verifySummary()}>
+          <div class="oc-orchestration-field">
+            <label for={summaryID}>Expected summary (exact text)</label>
+            <textarea
+              id={summaryID}
+              value={expectedSummary()}
+              rows={3}
+              maxLength={VERIFICATION_SUMMARY_MAX_LENGTH}
+              disabled={props.controls.view()?.busy() ?? true}
+              aria-describedby={`${hintID}${criterionError() ? ` ${errorID}` : ""}`}
+              aria-invalid={!!criterionError()}
+              style={{
+                width: "100%",
+                "box-sizing": "border-box",
+                padding: "8px",
+                border: "1px solid color-mix(in srgb,currentColor 30%,transparent)",
+                "border-radius": "6px",
+                background: "transparent",
+                color: "inherit",
+                font: "inherit",
+                resize: "vertical",
+              }}
+              onInput={(event) => setExpectedSummary(event.currentTarget.value)}
+            />
+            <p id={hintID} class="oc-orchestration-muted">
+              Enter your own expected text; it is not copied from the agent. Spaces and
+              capitalization matter. This text is sent to the shown model’s provider on approval; do
+              not enter secrets. The check runs locally and a mismatch blocks later steps, but it
+              does not verify files or underlying work.
+            </p>
+          </div>
+        </Show>
+        <label>
+          <input
+            type="checkbox"
+            checked={verifyCommand()}
+            disabled={props.controls.view()?.busy() ?? true}
+            onChange={(event) => {
+              setVerifyCommand(event.currentTarget.checked)
+              setCriterionError("")
+            }}
+          />{" "}
+          Require a local verification command after this step
+        </label>
+        <Show when={verifyCommand()}>
+          <div class="oc-orchestration-field">
+            <label for={commandID}>Verification command (exact text)</label>
+            <textarea
+              id={commandID}
+              value={command()}
+              rows={3}
+              maxLength={VERIFICATION_COMMAND_MAX_LENGTH}
+              disabled={props.controls.view()?.busy() ?? true}
+              aria-describedby={`${commandID}-hint${criterionError() ? ` ${errorID}` : ""}`}
+              aria-invalid={!!criterionError()}
+              style={{
+                width: "100%",
+                "box-sizing": "border-box",
+                padding: "8px",
+                border: "1px solid color-mix(in srgb,currentColor 30%,transparent)",
+                "border-radius": "6px",
+                background: "transparent",
+                color: "inherit",
+                font: "inherit",
+                resize: "vertical",
+              }}
+              onInput={(event) => setCommand(event.currentTarget.value)}
+            />
+            <p id={`${commandID}-hint`} class="oc-orchestration-muted">
+              Enter your own project check, such as a test command. It is not sent to the model. It
+              requires separate confirmation after the specialist finishes, runs locally with
+              project permissions and may change files or access the network. Exit zero passes this
+              check; it does not prove all work is correct.
+            </p>
+          </div>
+        </Show>
+        <Show when={criterionError()}>
+          <p id={errorID} role="alert" class="oc-orchestration-error">
+            {criterionError()}
+          </p>
+        </Show>
+        <Show when={!verifySummary() && !verifyCommand()}>
+          <p class="oc-orchestration-muted">
+            No independent verification configured. Results are unverified; self-reported checks
+            control progression.
+          </p>
+        </Show>
         <Show when={props.step.dependsOn.length > 0}>
           <label>
             <input
@@ -422,10 +787,7 @@ function GuidedStepRow(props: {
           </label>
         </Show>
         <div class="oc-orchestration-actions">
-          <ctx.ui.Button
-            disabled={props.controls.view()?.busy() ?? true}
-            onClick={() => props.controls.reviewStep(props.workflow, props.step, include())}
-          >
+          <ctx.ui.Button disabled={props.controls.view()?.busy() ?? true} onClick={review}>
             Review step
           </ctx.ui.Button>
         </div>

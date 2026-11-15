@@ -1,6 +1,7 @@
 import { type DesktopScope, scopeError } from "./gui-controller.ts"
 import type { GuidedReview, GuidedState, GuidedStep, GuidedWorkflow } from "./guided-rpc.ts"
 import { unwrapRoutingReply } from "./rpc.ts"
+import { type VerificationSpec, parseVerificationSpec } from "./verification.ts"
 import type { WorkflowDraft } from "./workflow-rpc.ts"
 
 export type GuidedRequest =
@@ -12,6 +13,7 @@ export type GuidedRequest =
       workflowID: string
       stepID: string
       includeDependencySummaries: boolean
+      verification?: VerificationSpec
     }
   | { method: "approve" | "dismiss"; sessionID: string; reviewID: string }
   | { method: "cancel"; sessionID: string; workflowID: string; stepID: string }
@@ -83,15 +85,25 @@ export function createGuidedActions(
         throw new Error("Set compatible model tiers and prepare a new draft.")
       return responseID(await request({ method: "begin", sessionID, draftID: draft.id }))
     },
-    async review(workflow: GuidedWorkflow, step: GuidedStep, includeDependencySummaries: boolean) {
+    async review(
+      workflow: GuidedWorkflow,
+      step: GuidedStep,
+      includeDependencySummaries: boolean,
+      verification?: VerificationSpec,
+    ) {
       checkStep(workflow, step)
       if (step.state !== "ready" || !step.model) throw new Error("This step is not ready.")
+      const criterion =
+        verification === undefined
+          ? undefined
+          : structuredClone(parseVerificationSpec(verification))
       const result = (await request({
         method: "review",
         sessionID,
         workflowID: workflow.id,
         stepID: step.id,
         includeDependencySummaries,
+        ...(criterion ? { verification: structuredClone(criterion) } : {}),
       })) as GuidedReview | undefined
       if (
         !result ||
@@ -102,6 +114,13 @@ export function createGuidedActions(
         result.task !== step.task ||
         result.agent !== step.agent ||
         result.model !== step.model ||
+        (criterion
+          ? !result.verification ||
+            Object.keys(result.verification).sort().join(",") !==
+              Object.keys(criterion).sort().join(",") ||
+            result.verification.summaryEquals !== criterion.summaryEquals ||
+            result.verification.command !== criterion.command
+          : result.verification !== undefined) ||
         !Number.isFinite(result.expiresAt) ||
         !Array.isArray(result.previousResults) ||
         (!includeDependencySummaries && result.previousResults.length > 0) ||

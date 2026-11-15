@@ -13,6 +13,8 @@ import { workflowRpc } from "./workflow-rpc.ts"
 import { registerWorkflowTool } from "./workflow-tool.ts"
 import { guidedRpc } from "./guided-rpc.ts"
 import { createGuidedWorkflows } from "./guided-workflows.ts"
+import { createCommandVerification } from "./command-verification.ts"
+import { commandVerificationRpc } from "./command-verification-rpc.ts"
 
 import { AGENT_IDS, parseOptions, type PluginSnapshot } from "./shared/types.ts"
 
@@ -76,6 +78,7 @@ export default Plugin.define({
     let desktopRegistration: ScopedRegistration | undefined
     let workflowRegistration: ScopedRegistration | undefined
     let guidedRegistration: ScopedRegistration | undefined
+    let commandVerificationRegistration: { dispose(): Promise<void> } | undefined
     const desktop = createDesktopControls({
       directory: context.location.directory,
       session,
@@ -105,12 +108,37 @@ export default Plugin.define({
         await guidedRegistration?.events.emit("changed", { sessionID })
       },
     })
+    const commandVerification = createCommandVerification({
+      directory: context.location.directory,
+      session,
+      target: guided.commandTarget,
+      record: guided.recordCommandResult,
+      assertPermission: (sessionID, command) =>
+        context.permission.assert({
+          sessionID: sessionID as SessionID,
+          agent: "verifier",
+          action: "shell",
+          resources: [command],
+          metadata: { command, directory: context.location.directory, timeoutMs: 30000 },
+        }),
+      subscribe: (signal) =>
+        context.event.subscribe({
+          types: ["shell.created", "shell.exited", "shell.deleted"],
+          signal,
+        }),
+    })
+    commandVerification.initialize()
     let toolRegistration: Awaited<ReturnType<typeof registerHandoffResultTool>> | undefined
     let desktopTools: Awaited<ReturnType<typeof registerDesktopTools>> | undefined
     let workflowTool: Awaited<ReturnType<typeof registerWorkflowTool>> | undefined
     let routingRegistration: { dispose(): Promise<void> } | undefined
     async function dispose() {
       let failure: unknown
+      try {
+        await commandVerification.dispose()
+      } catch (error) {
+        failure ??= error
+      }
       workflow.dispose()
       try {
         await guided.dispose()
@@ -119,6 +147,7 @@ export default Plugin.define({
       }
       for (const registration of [
         routingRegistration,
+        commandVerificationRegistration,
         guidedRegistration,
         workflowRegistration,
         desktopRegistration,
@@ -170,6 +199,12 @@ export default Plugin.define({
         approve: (input, call) => desktopReply(() => guided.approve(input, call.signal)),
         dismiss: (input, call) => desktopReply(() => guided.dismiss(input, call.signal)),
         cancel: (input, call) => desktopReply(() => guided.cancel(input, call.signal)),
+      })
+      commandVerificationRegistration = await context.rpc.register(commandVerificationRpc, {
+        prepare: (input, call) =>
+          desktopReply(() => commandVerification.prepare(input, call.signal)),
+        status: (input, call) => desktopReply(() => commandVerification.status(input, call.signal)),
+        cancel: (input, call) => desktopReply(() => commandVerification.cancel(input, call.signal)),
       })
       const registration = await context.rpc.register(routingRpc, {
         models: async (input, call) =>

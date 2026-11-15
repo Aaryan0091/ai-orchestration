@@ -1,5 +1,13 @@
 import { Rpc } from "@opencode/plugin/rpc"
 import { routingFailureSchema } from "./rpc.ts"
+import {
+  type VerificationResult,
+  type VerificationSpec,
+  type CommandVerificationResult,
+  commandVerificationResultSchema,
+  verificationResultSchema,
+  verificationSpecSchema,
+} from "./verification.ts"
 import type { WorkflowStepPreview } from "./workflow-plan.ts"
 
 const workflowStates = ["ready", "running", "completed", "stopped"] as const
@@ -20,6 +28,9 @@ export interface GuidedStep extends WorkflowStepPreview {
   runID?: string
   summary?: string
   diagnostic?: string
+  verification?: VerificationSpec
+  verificationResult?: VerificationResult
+  commandResult?: CommandVerificationResult
 }
 
 export interface GuidedWorkflow {
@@ -49,6 +60,7 @@ export interface GuidedReview {
   agent: WorkflowStepPreview["agent"]
   model: string
   previousResults: { stepID: string; runID: string; summary: string }[]
+  verification?: VerificationSpec
 }
 
 const text = { type: "string" } as const
@@ -74,6 +86,9 @@ const step = {
     runID: id,
     summary: text,
     diagnostic: text,
+    verification: verificationSpecSchema,
+    verificationResult: verificationResultSchema,
+    commandResult: commandVerificationResultSchema,
   },
   required: ["id", "task", "agent", "dependsOn", "difficulty", "tier", "state"],
   additionalProperties: false,
@@ -123,6 +138,7 @@ const review = {
     agent: text,
     model: text,
     previousResults: { type: "array", items: previousResult },
+    verification: verificationSpecSchema,
   },
   required: [
     "id",
@@ -189,6 +205,7 @@ export const guidedRpc = Rpc.define({
         properties: {
           ...stepInput.properties,
           includeDependencySummaries: { type: "boolean" },
+          verification: verificationSpecSchema,
         },
       },
       output: { anyOf: [review, routingFailureSchema] },
