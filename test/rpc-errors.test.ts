@@ -7,6 +7,14 @@ import { routingReply, safeApplicationMessage, unwrapRoutingReply } from "../src
 
 const wire = (value: unknown): unknown => JSON.parse(JSON.stringify(value))
 
+/** A native event stream remains open until plugin cleanup aborts it. */
+async function* nativeEvents({ signal }: { signal: AbortSignal }): AsyncGenerator<never> {
+  if (!signal.aborted)
+    await new Promise<void>((resolve) =>
+      signal.addEventListener("abort", () => resolve(), { once: true }),
+    )
+}
+
 test("application errors survive a JSON-only RPC boundary without raw provider details", async () => {
   const reply = wire(
     await routingReply(async () => {
@@ -55,13 +63,17 @@ test("malformed or errored approval replies never become successful plans", () =
 })
 
 test("all server RPC handlers return portable application failures, not opaque exceptions", async () => {
-  let handlers: Record<string, (input: string, call: { signal: AbortSignal }) => Promise<unknown>> =
-    {}
+  let handlers: Record<
+    string,
+    (input: unknown, call: { signal: AbortSignal }) => Promise<unknown>
+  > = {}
+  const contracts = new Map<string, typeof handlers>()
   const saved = new Map<string, unknown>()
   const cleanup = await server.setup({
     tool: { transform: async () => ({ dispose: async () => {} }) },
     location: { directory: "/rpc-errors" },
     options: {},
+    event: { subscribe: nativeEvents },
     storage: {
       get: async (key: string) => saved.get(key),
       set: async (key: string, value: unknown) => {
@@ -74,8 +86,9 @@ test("all server RPC handlers return portable application failures, not opaque e
     session: { hook: async () => ({ dispose: async () => {} }) },
     model: { list: async () => ({ data: [] }) },
     rpc: {
-      register: async (_: unknown, value: typeof handlers) => {
+      register: async (definition: { id: string }, value: typeof handlers) => {
         handlers = value
+        contracts.set(definition.id, value)
         return { dispose: async () => {} }
       },
     },
@@ -103,6 +116,42 @@ test("all server RPC handlers return portable application failures, not opaque e
     expect(
       typeof (await handlers.discard?.("unknown", { signal: new AbortController().signal })),
     ).toBe("string")
+    for (const [contract, method, input] of [
+      [
+        "ai-orchestration.guided",
+        "review",
+        {
+          sessionID: "origin",
+          workflowID: "workflow",
+          stepID: "step",
+          verification: { summaryEquals: "OK", passed: true },
+        },
+      ],
+      [
+        "ai-orchestration.command-verification",
+        "prepare",
+        { sessionID: "origin", workflowID: "workflow", stepID: "step", command: "unapproved" },
+      ],
+      [
+        "ai-orchestration.command-verification",
+        "status",
+        { sessionID: "origin", id: "ticket", passed: true },
+      ],
+      [
+        "ai-orchestration.command-verification",
+        "cancel",
+        { sessionID: "origin", id: "ticket", result: { exitCode: 0 } },
+      ],
+    ] as const) {
+      const reply = wire(
+        await contracts.get(contract)![method]!(input, { signal: new AbortController().signal }),
+      )
+      expect(reply).toMatchObject({
+        ok: false,
+        error: { code: "routing.application", message: expect.any(String) },
+      })
+      expect(JSON.stringify(reply)).not.toContain("Request failed")
+    }
   } finally {
     await cleanup?.()
   }
@@ -113,6 +162,7 @@ test("server releases each registration and retry guard on registration failure 
     "ai-orchestration.desktop",
     "ai-orchestration.workflow",
     "ai-orchestration.guided",
+    "ai-orchestration.command-verification",
     "ai-orchestration.routing",
     null,
   ]) {
@@ -121,6 +171,7 @@ test("server releases each registration and retry guard on registration failure 
     const context = {
       location: { directory: "/cleanup" },
       options: {},
+      event: { subscribe: nativeEvents },
       storage: { set: async () => {}, get: async () => undefined },
       session: {
         hook: async () => ({
@@ -159,6 +210,12 @@ test("server releases each registration and retry guard on registration failure 
     expect(disposed).toEqual([
       ...(!failRegistration ? ["ai-orchestration.routing"] : []),
       ...(!failRegistration || failRegistration === "ai-orchestration.routing"
+        ? ["ai-orchestration.command-verification"]
+        : []),
+      ...(!failRegistration ||
+      ["ai-orchestration.routing", "ai-orchestration.command-verification"].includes(
+        failRegistration,
+      )
         ? ["ai-orchestration.guided"]
         : []),
       ...(!["ai-orchestration.desktop", "ai-orchestration.workflow"].includes(

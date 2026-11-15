@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import type { ExecutionPlan, ExecutionRequest, TaskRun } from "../src/execution.ts"
 import { createGuidedWorkflows } from "../src/guided-workflows.ts"
-import type { SpecialistReport } from "../src/handoffs.ts"
+import { type SpecialistReport, validateHandoff } from "../src/handoffs.ts"
 import type { WorkflowDraft } from "../src/workflow-rpc.ts"
+import type { VerificationSpec } from "../src/verification.ts"
 
 const directory = "/guided-workflow-test"
 const sessionID = "chat-a"
@@ -125,8 +126,13 @@ function fixture() {
   async function begin(selectedDraftID = draftID) {
     return (await api.begin({ sessionID, draftID: selectedDraftID })).id
   }
-  async function review(workflowID: string, stepID: string, includeDependencySummaries?: boolean) {
-    return api.review({ sessionID, workflowID, stepID, includeDependencySummaries })
+  async function review(
+    workflowID: string,
+    stepID: string,
+    includeDependencySummaries?: boolean,
+    verification?: VerificationSpec,
+  ) {
+    return api.review({ sessionID, workflowID, stepID, includeDependencySummaries, verification })
   }
   async function approve(reviewID: string, signal?: AbortSignal) {
     return api.approve({ sessionID, reviewID }, signal)
@@ -181,6 +187,223 @@ function fixture() {
 }
 
 describe("guided workflows", () => {
+  test("trusted expected text is frozen in review; local equality passes without model evidence", async () => {
+    const f = fixture()
+    const id = await f.begin()
+    const input = { summaryEquals: "EXPECTED ✅" }
+    const review = await f.review(id, "inspect", false, input)
+    input.summaryEquals = "INPUT_MUTATION"
+    expect(review.verification).toEqual({ summaryEquals: "EXPECTED ✅" })
+    review.verification!.summaryEquals = "REPLY_MUTATION"
+    expect(f.calls.start).toHaveLength(0)
+    await f.approve(review.id)
+    expect(f.calls.preview[0]?.handoff?.constraints.join("\n")).toContain("EXPECTED ✅")
+    expect(f.calls.preview[0]?.handoff?.constraints.join("\n")).not.toContain("MUTATION")
+    f.finish(f.calls.start[0]!, "EXPECTED ✅")
+    const state = await f.state()
+    expect(state.steps[0]).toMatchObject({
+      state: "completed",
+      verification: { summaryEquals: "EXPECTED ✅" },
+      verificationResult: {
+        status: "passed",
+        source: "local-summary-equality",
+        expectedSummary: "EXPECTED ✅",
+        actualSummary: "EXPECTED ✅",
+      },
+    })
+    expect(state.steps[1]?.state).toBe("ready")
+    state.steps[0]!.verification!.summaryEquals = "STATE_MUTATION"
+    expect((await f.state()).steps[0]?.verification?.summaryEquals).toBe("EXPECTED ✅")
+  })
+
+  test("completed execution with failed independent verification blocks all dependents", async () => {
+    const f = fixture()
+    const id = await f.begin()
+    await f.approve((await f.review(id, "inspect", false, { summaryEquals: "OK" })).id)
+    f.finish(f.calls.start[0]!, "OK\n")
+    const state = await f.state()
+    expect(state.state).toBe("stopped")
+    expect(state.steps.map((step) => step.state)).toEqual(["completed", "blocked", "blocked"])
+    expect(state.steps[0]?.verificationResult).toMatchObject({
+      status: "failed",
+      source: "local-summary-equality",
+      expectedSummary: "OK",
+      actualSummary: "OK\n",
+    })
+    await expect(f.review(id, "plan")).rejects.toThrow("not ready")
+    expect(f.calls.start).toHaveLength(1)
+    expect((await f.state()).steps[0]?.verificationResult?.status).toBe("failed")
+  })
+
+  test("max-length escaped expected text stays within handoff transport limits", async () => {
+    const f = fixture()
+    const id = await f.begin()
+    const summaryEquals = `X${'\n"\\'.repeat(666)}Y`
+    expect(summaryEquals.length).toBe(2000)
+    await f.approve((await f.review(id, "inspect", false, { summaryEquals })).id)
+    const handoff = f.calls.preview[0]!.handoff!
+    expect(() => validateHandoff(handoff)).not.toThrow()
+    expect(handoff.constraints.at(-1)).toEndWith(summaryEquals)
+    f.finish(f.calls.start[0]!, summaryEquals)
+    expect((await f.state()).steps[0]?.verificationResult?.status).toBe("passed")
+  })
+
+  test("no configured verification remains unverified without changing legacy progression", async () => {
+    const f = fixture()
+    const id = await f.begin()
+    await f.approve((await f.review(id, "inspect")).id)
+    f.finish(f.calls.start[0]!, "Agent result")
+    const state = await f.state()
+    expect(state.steps[0]?.verificationResult).toMatchObject({
+      status: "unverified",
+      source: "not-configured",
+    })
+    expect(state.steps[1]?.state).toBe("ready")
+  })
+
+  test("malformed verification and approval-time replacement are rejected without dispatch", async () => {
+    const f = fixture()
+    const id = await f.begin()
+    for (const verification of [
+      {},
+      null,
+      { summaryEquals: "" },
+      { summaryEquals: "OK", executable: "x" },
+    ])
+      await expect(
+        f.api.review({ sessionID, workflowID: id, stepID: "inspect", verification }),
+      ).rejects.toThrow("Verification must contain only")
+    const review = await f.review(id, "inspect", false, { summaryEquals: "OK" })
+    await expect(
+      f.api.approve({ sessionID, reviewID: review.id, verification: { summaryEquals: "BYPASS" } }),
+    ).rejects.toThrow("Invalid guided workflow")
+    expect(f.calls.start).toHaveLength(0)
+  })
+
+  test("frozen command criteria wait for trusted native evidence and never reach the specialist", async () => {
+    const f = fixture()
+    const id = await f.begin()
+    const spec = { command: "bun test", summaryEquals: "OK" }
+    await f.approve((await f.review(id, "inspect", false, spec)).id)
+    expect(JSON.stringify(f.calls.preview[0]?.handoff)).not.toContain("bun test")
+    await expect(
+      f.api.commandTarget({ sessionID, workflowID: id, stepID: "inspect" }),
+    ).rejects.toThrow()
+    f.finish(f.calls.start[0]!, "OK")
+    const waiting = await f.state()
+    expect(waiting.state).toBe("stopped")
+    expect(waiting.steps.map((step) => step.state)).toEqual(["completed", "blocked", "blocked"])
+    expect(waiting.steps[0]?.verificationResult?.status).toBe("unverified")
+    const target = await f.api.commandTarget({ sessionID, workflowID: id, stepID: "inspect" })
+    expect(target).toMatchObject({ command: "bun test", runID: waiting.steps[0]?.runID, directory })
+    await expect(
+      f.api.commandTarget({ sessionID: "chat-b", workflowID: id, stepID: "inspect" }),
+    ).rejects.toThrow("not available")
+    await f.api.recordCommandResult(target, {
+      status: "running",
+      source: "native-shell",
+      command: "bun test",
+      ticketID: "ticket-1",
+      shellID: "shell-1",
+      diagnostic: "Native check running",
+    })
+    expect((await f.state()).steps[1]?.state).toBe("blocked")
+    await expect(
+      f.api.recordCommandResult(target, {
+        status: "passed",
+        source: "native-shell",
+        command: "bun test",
+        ticketID: "ticket-1",
+        shellID: "shell-1",
+        exitCode: 1,
+        diagnostic: "Wrong exit code",
+      }),
+    ).rejects.toThrow("does not match")
+    const passed = {
+      status: "passed" as const,
+      source: "native-shell" as const,
+      command: "bun test",
+      ticketID: "ticket-1",
+      shellID: "shell-1",
+      exitCode: 0,
+      diagnostic: "Native command exited with zero",
+    }
+    await f.api.recordCommandResult(target, passed)
+    passed.command = "mutated"
+    const state = await f.state()
+    expect(state.steps[0]?.commandResult?.command).toBe("bun test")
+    expect(state.steps[0]?.verificationResult).toMatchObject({
+      status: "passed",
+      source: "local-checks",
+    })
+    expect(state.steps[1]?.state).toBe("ready")
+    await expect(
+      f.api.recordCommandResult(target, {
+        status: "running",
+        source: "native-shell",
+        command: "bun test",
+        ticketID: "ticket-1",
+        diagnostic: "Stale poll",
+      }),
+    ).rejects.toThrow("does not match")
+    expect(f.calls.start).toHaveLength(1)
+  })
+
+  test("command failure and cancellation block; failed summary or lost report prevents command setup", async () => {
+    for (const status of ["failed", "cancelled"] as const) {
+      const f = fixture()
+      const id = await f.begin()
+      await f.approve((await f.review(id, "inspect", false, { command: "bun test" })).id)
+      f.finish(f.calls.start[0]!, "Report")
+      const target = await f.api.commandTarget({ sessionID, workflowID: id, stepID: "inspect" })
+      await f.api.recordCommandResult(target, {
+        status,
+        source: "native-shell",
+        command: "bun test",
+        ticketID: "ticket",
+        shellID: "shell",
+        exitCode: 1,
+        diagnostic: "Native command did not pass",
+      })
+      expect((await f.state()).steps[0]?.state).toBe("completed")
+      expect((await f.state()).steps[0]?.verificationResult?.status).toBe("failed")
+      expect((await f.state()).steps[1]?.state).toBe("blocked")
+      await expect(f.review(id, "plan")).rejects.toThrow("not ready")
+    }
+    const f = fixture()
+    const id = await f.begin()
+    await f.approve(
+      (await f.review(id, "inspect", false, { command: "bun test", summaryEquals: "OK" })).id,
+    )
+    f.finish(f.calls.start[0]!, "WRONG")
+    await expect(
+      f.api.commandTarget({ sessionID, workflowID: id, stepID: "inspect" }),
+    ).rejects.toThrow("summary check")
+    f.runs.delete(f.calls.start[0]!)
+    await expect(
+      f.api.commandTarget({ sessionID, workflowID: id, stepID: "inspect" }),
+    ).rejects.toThrow("result is unavailable")
+  })
+
+  test("dependency equality is rechecked after async preparation, not trusted from cached success", async () => {
+    const f = fixture()
+    const id = await f.begin()
+    await f.approve((await f.review(id, "inspect", false, { summaryEquals: "OK" })).id)
+    const firstID = f.calls.start[0]!
+    f.finish(firstID, "OK")
+    const next = await f.review(id, "plan")
+    const gate = Promise.withResolvers<void>()
+    f.holdPreview(gate.promise)
+    const approval = f.approve(next.id)
+    expect((await f.state()).steps[1]?.state).toBe("starting")
+    f.finish(firstID, "CHANGED")
+    gate.resolve()
+    await expect(approval).rejects.toThrow("specialist result is unavailable")
+    expect(f.calls.start).toEqual([firstID])
+    expect((await f.state()).steps[0]?.verificationResult?.status).toBe("failed")
+    expect((await f.state()).state).toBe("stopped")
+  })
+
   test("setup and review are inert; an exact one-time approval starts only the ordered step", async () => {
     const f = fixture()
     const id = await f.begin()
@@ -441,5 +664,54 @@ describe("guided workflows", () => {
     expect(ids).toHaveLength(5)
     expect(ids).toContain(replacement)
     expect(ids).not.toContain(first)
+  })
+
+  test("capacity protects pending, running, and unconfirmed command checks, but may evict confirmed failures", async () => {
+    for (const status of ["pending", "running", "unverified"] as const) {
+      const f = fixture()
+      const first = await f.begin()
+      await f.approve((await f.review(first, "inspect", false, { command: "bun test" })).id)
+      f.finish(f.calls.start[0]!, "First report")
+      const target = await f.api.commandTarget({ sessionID, workflowID: first, stepID: "inspect" })
+      await f.api.recordCommandResult(target, {
+        status,
+        source: "native-shell",
+        command: "bun test",
+        ticketID: "protected-ticket",
+        ...(status === "running" ? { shellID: "protected-shell" } : {}),
+        diagnostic: "Native stop has not been confirmed",
+      })
+      const ids = [first]
+      for (let index = 1; index < 5; index++) {
+        f.draft.id = `capacity-draft-${index}`
+        ids.push(await f.begin(f.draft.id))
+      }
+      f.draft.id = "over-capacity"
+      await expect(f.begin(f.draft.id)).rejects.toThrow("limit was reached")
+      expect((await f.api.state({ sessionID })).workflows.map(({ id }) => id)).toContain(first)
+      const failedID = ids[1]!
+      await f.approve((await f.review(failedID, "inspect", false, { command: "bun test" })).id)
+      f.finish(f.calls.start[1]!, "Second report")
+      const failed = await f.api.commandTarget({
+        sessionID,
+        workflowID: failedID,
+        stepID: "inspect",
+      })
+      await f.api.recordCommandResult(failed, {
+        status: "failed",
+        source: "native-shell",
+        command: "bun test",
+        ticketID: "failed-ticket",
+        shellID: "failed-shell",
+        exitCode: 1,
+        diagnostic: "Native command exited with a failure",
+      })
+      const replacement = await f.begin(f.draft.id)
+      const remaining = (await f.api.state({ sessionID })).workflows.map(({ id }) => id)
+      expect(remaining).toHaveLength(5)
+      expect(remaining).toContain(first)
+      expect(remaining).not.toContain(failedID)
+      expect(remaining).toContain(replacement)
+    }
   })
 })
